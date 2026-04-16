@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "puffoagent"
+version = "0.1.0"
+description = "Multi-agent portal for Puffo.ai — run and manage AI bot accounts on your machine"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "anthropic>=0.25",
+    "openai>=1.30",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+puffoagent = "puffoagent.portal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

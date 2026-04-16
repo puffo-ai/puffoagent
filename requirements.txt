@@ -1,0 +1,4 @@
+aiohttp>=3.9
+anthropic>=0.25
+openai>=1.30
+pyyaml>=6.0

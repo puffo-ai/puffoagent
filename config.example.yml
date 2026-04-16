@@ -1,0 +1,25 @@
+mattermost:
+  url: "http://localhost:8065"
+  bot_token: ""         # Bot account token from Mattermost > Integrations > Bot Accounts
+  team_name: "puffo"
+  channels:
+    - "town-square"
+    - "off-topic"
+
+ai:
+  default_provider: "anthropic"  # "anthropic" or "openai"
+  anthropic:
+    api_key: ""         # https://console.anthropic.com/
+    model: "claude-sonnet-4-6"
+  openai:
+    api_key: ""         # https://platform.openai.com/
+    model: "gpt-4o"
+
+api_port: 8066  # Port for the agent REST API (profile + usage endpoints)
+
+agent:
+  profile: "agents/default.md"
+  memory_dir: "memory/"
+  skills_dir: "skills/"
+  trigger_on_mention: true
+  trigger_on_dm: true
