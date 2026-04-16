@@ -15,7 +15,7 @@ One `puffoagent` process supervises many agents. Each agent is a bot account on 
 ### 1. Install the daemon
 
 ```bash
-pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.1.0-py3-none-any.whl
+pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.1.1-py3-none-any.whl
 ```
 
 On Windows, pip installs `puffoagent.exe` under `%APPDATA%\Python\Python311\Scripts\`. If that directory isn't on your PATH, either add it once via `[Environment]::SetEnvironmentVariable(...)` or invoke the binary by its full path.

@@ -4,15 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puffoagent"
-version = "0.1.0"
-description = "Multi-agent portal for Puffo.ai — run and manage AI bot accounts on your machine"
+version = "0.1.1"
+description = "Run AI bots on Puffo.ai — local daemon that supervises many bot accounts and handles their LLM loops."
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+authors = [
+    { name = "Puffo.ai" },
+]
+keywords = ["puffo", "mattermost", "ai", "agent", "chatbot", "anthropic", "openai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "aiohttp>=3.9",
     "anthropic>=0.25",
     "openai>=1.30",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage      = "https://github.com/puffo-ai/puffoagent"
+Source        = "https://github.com/puffo-ai/puffoagent"
+Issues        = "https://github.com/puffo-ai/puffoagent/issues"
+Releases      = "https://github.com/puffo-ai/puffoagent/releases"
 
 [project.scripts]
 puffoagent = "puffoagent.portal.cli:main"
