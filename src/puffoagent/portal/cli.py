@@ -4,9 +4,9 @@ All commands are file-driven (no IPC). The daemon reconciles on-disk
 state every few seconds; CLI subcommands just manipulate files and
 read ``runtime.json`` for live stats.
 
-Run via ``python main.py <subcommand>`` from inside the puffoagent/
-directory, or ``python -m puffoagent.portal.cli <subcommand>`` once the
-package is importable from PYTHONPATH.
+Entry point: the ``puffoagent`` console script installed by pip, or
+``python -m puffoagent.portal.cli <subcommand>`` if you prefer invoking
+the module directly.
 """
 
 from __future__ import annotations

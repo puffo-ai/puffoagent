@@ -14,7 +14,6 @@ import logging
 import os
 import signal
 
-from .migrate import migrate_legacy_repo_layout_if_needed
 from .state import (
     AgentConfig,
     DaemonConfig,
@@ -138,9 +137,6 @@ async def run_daemon() -> int:
         pid = read_daemon_pid()
         logger.error("another daemon is already running (pid=%s)", pid)
         return 1
-
-    # Migrate the repo-local single-agent layout on first run.
-    migrate_legacy_repo_layout_if_needed()
 
     home_dir().mkdir(parents=True, exist_ok=True)
     agents_dir().mkdir(parents=True, exist_ok=True)

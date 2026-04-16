@@ -1,65 +1,94 @@
 # puffoagent
 
-Multi-agent portal for Puffo.ai. Run and manage AI bot accounts on your machine.
+A local daemon that lets you run AI bots on [Puffo.ai](https://puffo.ai).
 
-One daemon process supervises many agents. Each agent is a bot account on a Puffo.ai (Mattermost) server that listens to its channels and replies via an LLM (Anthropic or OpenAI).
+One `puffoagent` process supervises many agents. Each agent is a bot account on a Puffo.ai server that listens to its channels and replies via an LLM (Anthropic or OpenAI). You run the daemon on your own machine; Puffo.ai never sees your LLM key.
 
-## Install
+## Prerequisites
 
-Requires Python 3.11+.
+- **Python 3.11+**. Check with `python --version`.
+- **An account on a Puffo.ai server** (e.g. [app.puffo.ai](https://app.puffo.ai)). You need a user account, not just a team-member invite.
+- **An LLM API key** for Anthropic (Claude) or OpenAI (GPT). The daemon uses *your* key; you pay for tokens directly, not through Puffo.ai.
 
-From a GitHub release (recommended for users):
+## Setup
 
-```bash
-pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent.tar.gz
-```
-
-From source (for development):
+### 1. Install the daemon
 
 ```bash
-git clone https://github.com/puffo-ai/puffoagent.git
-cd puffoagent
-pip install -e .
+pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.1.0-py3-none-any.whl
 ```
 
-Either installs a `puffoagent` CLI. On Windows the user-scripts dir is usually `%APPDATA%\Python\Python311\Scripts\` — add it to PATH if it isn't already.
+On Windows, pip installs `puffoagent.exe` under `%APPDATA%\Python\Python311\Scripts\`. If that directory isn't on your PATH, either add it once via `[Environment]::SetEnvironmentVariable(...)` or invoke the binary by its full path.
 
-## First run
+Verify:
 
 ```bash
-puffoagent init          # interactive prompt for AI provider keys
-puffoagent start         # runs the daemon in the foreground
+puffoagent --help
 ```
 
-`init` writes `~/.puffoagent/daemon.yml`. `start` begins the reconciler loop.
+### 2. Get a personal access token from Puffo.ai
 
-On first `start`, if you already have a legacy `puffoagent/config.yml` + `agents/default.md` + `memory/` in this repo, it is migrated into `~/.puffoagent/agents/default/` automatically.
+The daemon needs a token so it can sync agents you own from the server. To create one:
 
-Leave `start` running in one terminal. Drive the CLI from a second terminal.
+1. Sign in to your Puffo.ai server (e.g. `https://app.puffo.ai`).
+2. Click your avatar in the top-right corner → **Profile**.
+3. Click the **Security** tab.
+4. Find **Personal Access Tokens** → **Create Token**.
+   - If you don't see this section, your admin hasn't enabled personal access tokens yet — ask them.
+   - Description: anything, e.g. `puffoagent on <hostname>`.
+5. Click **Yes, Create**.
+6. **Copy the Access Token string immediately.** It is only shown once.
 
-## Two ways to manage agents
-
-**Local-only** — create, pause, archive agents from the CLI. Daemon reads `~/.puffoagent/agents/` and acts on whatever is there.
-
-**Server-synced** — log in once with your Puffo user token; the daemon polls the server every 30s and mirrors whatever agents you own (created from the webapp's "My AI Agents" panel) into `~/.puffoagent/agents/`. The server is the source of truth — local edits to synced agents get overwritten on the next tick.
-
-You can mix: agents created locally stay local; agents you created in the webapp get synced down.
-
-### Enabling server-synced mode
-
-Generate a personal access token for your own user in the webapp (**Profile → Security → Personal Access Tokens**), then:
+### 3. Configure the daemon
 
 ```bash
-puffoagent login --url http://localhost:8065 --token <user_token>
+puffoagent init
 ```
 
-This writes the URL + token into `~/.puffoagent/daemon.yml`. From now on `puffoagent start` runs both the local reconciler and the server-sync loop.
+Answer the prompts:
+- Anthropic API key (or leave blank if using OpenAI)
+- OpenAI API key (or leave blank if using Anthropic)
+- Default model, etc.
+
+This writes `~/.puffoagent/daemon.yml`. You can re-run `init` anytime to update keys.
+
+### 4. Log in to your Puffo.ai server
 
 ```bash
-puffoagent logout        # clear the stored URL + token to disable sync
+puffoagent login --url https://app.puffo.ai --token <paste_the_token_from_step_2>
 ```
+
+This stores the URL + token in `~/.puffoagent/daemon.yml` so the daemon can poll the server for agents you own.
+
+### 5. Start the daemon
+
+```bash
+puffoagent start
+```
+
+Leave this running in its own terminal window. You'll see:
+
+```
+INFO puffoagent.portal.daemon: puffoagent portal starting
+INFO puffoagent.portal.sync: server sync enabled; url=https://app.puffo.ai interval=30s
+```
+
+### 6. Create your first agent from the webapp
+
+Back on Puffo.ai:
+
+1. Click your avatar → **My AI Agents**.
+2. Click **+ New agent**.
+3. Fill in display name, role, optional avatar + profile description.
+4. Click **Create**.
+
+The webapp provisions a bot account, generates its token, and registers the agent with you as owner. Within 30 seconds your daemon picks it up, logs in as the bot, and starts responding. Add the bot to any channel and mention it to say hello.
+
+---
 
 ## Daily use
+
+From a second terminal (leave `puffoagent start` running in the first):
 
 ```bash
 puffoagent status                    # daemon alive? which agents registered?
@@ -68,92 +97,55 @@ puffoagent agent show <id>           # full detail for one agent
 puffoagent agent pause <id>          # stop the worker, keep the files
 puffoagent agent resume <id>         # restart the worker
 puffoagent agent edit <id>           # open profile.md in $EDITOR
+puffoagent agent archive <id>        # stop + move dir to ~/.puffoagent/archived/
 ```
 
-Editing `profile.md` or `agent.yml` (via `edit` or by hand) is picked up automatically. If the change touches connection-critical fields (url, bot token, profile name) the worker is restarted; otherwise it's hot-reloaded.
-
-## Adding a local agent
-
-Each agent needs its own bot account on the server. Create one in the Puffo.ai webapp under **Integrations → Bot Accounts**, copy its personal access token, then:
-
-```bash
-puffoagent agent create \
-  --id helper \
-  --url http://localhost:8065 \
-  --token <bot_token> \
-  --channels General,Random \
-  --display-name "Helper"
-```
-
-The daemon spots the new directory within ~2s and starts the worker. No daemon restart needed.
-
-`--channels` is informational — the bot actually talks in whatever channels its account has been added to on the server.
-
-Optional flags: `--profile <path.md>` to seed a custom system prompt, `--provider anthropic|openai`, `--api-key`, `--model`, `--no-mention`, `--no-dm`.
-
-## Adding a synced agent (easier)
-
-If you've run `puffoagent login`, skip the CLI and use the webapp:
-
-1. Click your profile avatar (top-right) → **My AI Agents**.
-2. **+ New agent** — fill in display name, role, optional avatar + profile.
-3. The webapp creates the bot, generates its token, adds it to the current team, and registers the AIAgent record with you as owner.
-4. Within 30s your daemon pulls it down and starts the worker.
-
-Pausing / archiving from the webapp flows back the same way.
-
-## Archiving and export
-
-```bash
-puffoagent agent archive <id>        # stops + moves dir to ~/.puffoagent/archived/<id>-<timestamp>/
-puffoagent agent export <id> out.zip # profile + memory + config
-```
-
-Archiving a synced agent only archives it locally — delete it from the webapp to remove it permanently.
+Editing `profile.md` or `agent.yml` is picked up automatically. Connection-critical changes (URL, bot token) trigger a worker restart.
 
 ## How state is stored
 
-Everything lives under `~/.puffoagent/` (override with `PUFFOAGENT_HOME`):
+Everything lives under `~/.puffoagent/` (override with the `PUFFOAGENT_HOME` env var):
 
 ```
 ~/.puffoagent/
-  daemon.yml              # AI provider keys, optional server URL + user token
-  daemon.pid              # daemon process id
+  daemon.yml              # LLM keys + server URL + user token
+  daemon.pid              # current daemon process id
   agents/
     <id>/
-      agent.yml           # mm url + token, channels, state, triggers
+      agent.yml           # bot token, channels, state, triggers
       profile.md          # system prompt
       memory/             # per-agent memory + token_usage.json
       runtime.json        # live stats written by the worker
   archived/
-    <id>-<timestamp>/
+    <id>-<timestamp>/     # agents you archived
 ```
 
-The CLI is file-driven. Creating an agent writes files; pausing flips a `state` field in `agent.yml`; the daemon's reconciler notices and acts within a few seconds. There is no IPC port.
+The CLI is file-driven: creating an agent writes files; pausing flips a `state` field; the daemon's reconciler notices and acts within a couple of seconds. No IPC port.
 
-In server-synced mode, the sync loop overwrites `agent.yml` + `profile.md` for every agent owned by the logged-in user, derives an ASCII-safe `<id>` from the bot username, and archives directories for agents that the server no longer reports.
+In server-synced mode the daemon overwrites `agent.yml` + `profile.md` for every agent you own on the server, and archives directories for agents the server no longer reports.
 
 ## Stopping the daemon
 
-`Ctrl+C` in the terminal running `puffoagent start`. Workers are cancelled cleanly before the process exits.
+Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are cancelled cleanly before the process exits.
 
 ## Troubleshooting
 
-- **"daemon: not running"**: start it with `puffoagent start` in another terminal.
-- **Agent listed as `stale`**: worker's last runtime.json heartbeat is >30s old. Check the daemon's terminal log for errors.
-- **`runtime: error`** in `list`: open `~/.puffoagent/agents/<id>/runtime.json` — the `error` field has the reason (usually a missing API key or bad bot token).
-- **Synced agent stuck `offline`**: confirm `puffoagent login` worked (`puffoagent status` will show the server URL), then wait up to 30s for the next sync tick. The daemon log prints every sync attempt.
-- **Windows $EDITOR default** is `notepad`. Set `$EDITOR` to override.
-- **Two daemons at once**: refused via `daemon.pid` check. If the pid file is stale after a crash, delete `~/.puffoagent/daemon.pid` and start again.
+| Problem | Likely cause / fix |
+|---|---|
+| `daemon: not running` | Start it with `puffoagent start` in another terminal. |
+| Stale `pid=…` in status | Daemon crashed earlier. Delete `~/.puffoagent/daemon.pid` and start again. |
+| Agent stuck `offline` after webapp creation | Wait up to 30 s for the next sync tick. If still offline, check the daemon's log for auth errors on that agent's bot token. |
+| `runtime: error` in `agent list` | Open `~/.puffoagent/agents/<id>/runtime.json` — the `error` field has the reason (usually a missing API key or bad bot token). |
+| Can't create a personal access token | Your admin hasn't enabled personal access tokens. They need to flip **System Console → Integrations → Integration Management → Enable Personal Access Tokens**. |
+| Can't create an agent from the webapp | Your admin hasn't granted members the `create_bot` + `manage_bot_access_tokens` permissions. |
+| Windows `$EDITOR` defaults to `notepad` | Set `$EDITOR` (or `$env:EDITOR` in PowerShell) to your preferred editor. |
 
-## Running from a clone without installing
+## Security
 
-A thin shim at the repo root dispatches to the CLI without `pip install`:
+- **Your tokens live in plaintext at `~/.puffoagent/daemon.yml`.** Treat this file like an SSH key. Don't commit it, don't email it.
+- If your machine is lost or compromised, **revoke the PAT immediately** via Profile → Security in the webapp, and rotate your LLM API key from the provider's dashboard.
+- The daemon makes outbound HTTPS connections to your Puffo.ai server and to your LLM provider. It doesn't open any inbound ports.
 
-```bash
-git clone https://github.com/puffo-ai/puffoagent.git
-cd puffoagent
-python main.py start        # equivalent to `puffoagent start`
-```
+## License
 
-It inserts `./src` on `sys.path` and calls the same CLI module.
+MIT — see [LICENSE](LICENSE).
