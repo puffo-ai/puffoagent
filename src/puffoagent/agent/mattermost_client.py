@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+from pathlib import Path
 import aiohttp
 
 from ._logging import agent_logger
@@ -20,6 +22,7 @@ class MattermostClient:
         profile_name: str = "default",
         file_server_url: str = "",
         agent_id: str = "",
+        workspace_dir: str = "",
     ):
         self.url = url.rstrip("/")
         self.token = token
@@ -27,6 +30,14 @@ class MattermostClient:
         self.file_server_url = file_server_url
         self.ws_url = self.url.replace("http://", "ws://").replace("https://", "wss://") + "/api/v4/websocket"
         self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        # Attachments on incoming posts get downloaded under
+        # ``<workspace_dir>/attachments/<post_id>/`` so the agent can
+        # open them with its normal Read tool. The relative path
+        # ``attachments/<post_id>/<filename>`` is what we surface in
+        # the user-message preamble — relative so the same string
+        # works for SDK/chat-only (cwd=workspace on host) and for
+        # cli-docker (cwd=/workspace in container).
+        self.workspace_dir = workspace_dir
         self.bot_user_id: str = ""
         self.bot_username: str = ""
         self._ws = None  # active WebSocket connection for typing events
@@ -197,6 +208,60 @@ class MattermostClient:
             async with session.get(f"{self.url}/api/v4/users/{user_id}") as resp:
                 return await resp.json()
 
+    async def _download_attachments(
+        self, session: aiohttp.ClientSession, post_id: str, file_ids: list[str],
+    ) -> list[str]:
+        """Download each attached file to
+        ``<workspace>/attachments/<post_id>/<filename>`` and return
+        the list of paths RELATIVE to ``workspace_dir`` so the agent
+        can resolve them from its own cwd (works identically on host
+        and inside the cli-docker container).
+        """
+        if not file_ids or not self.workspace_dir:
+            return []
+        dest_root = Path(self.workspace_dir) / "attachments" / post_id
+        try:
+            dest_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.logger.warning("cannot create %s: %s", dest_root, exc)
+            return []
+
+        rel_paths: list[str] = []
+        for fid in file_ids:
+            try:
+                async with session.get(f"{self.url}/api/v4/files/{fid}/info") as resp:
+                    if resp.status != 200:
+                        self.logger.warning(
+                            "file info %s failed: %s", fid, resp.status,
+                        )
+                        continue
+                    info = await resp.json()
+                filename = info.get("name") or fid
+                # Strip any path separators the server may have sent
+                # so we can't be redirected outside the dest dir.
+                filename = os.path.basename(filename) or fid
+                dest = dest_root / filename
+                async with session.get(f"{self.url}/api/v4/files/{fid}") as resp:
+                    if resp.status != 200:
+                        self.logger.warning(
+                            "file get %s failed: %s", fid, resp.status,
+                        )
+                        continue
+                    data = await resp.read()
+                dest.write_bytes(data)
+                # Use forward slashes in the reported path so the
+                # value looks the same in the user-message preamble
+                # across Windows and Linux.
+                rel_paths.append(f"attachments/{post_id}/{filename}")
+            except Exception as exc:
+                self.logger.warning("attachment %s download failed: %s", fid, exc)
+        if rel_paths:
+            self.logger.info(
+                "downloaded %d attachment(s) for post %s -> %s",
+                len(rel_paths), post_id, dest_root,
+            )
+        return rel_paths
+
     async def listen(self, on_message):
         """
         on_message(channel_id, channel_name, sender_name, sender_email, text, root_id, direct)
@@ -234,7 +299,7 @@ class MattermostClient:
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             event = json.loads(msg.data)
-                            await self._handle_event(event, on_message)
+                            await self._handle_event(event, on_message, session)
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             self.logger.warning("WebSocket closed/error, reconnecting...")
                             break
@@ -257,7 +322,7 @@ class MattermostClient:
             # __aexit__ (which will close the underlying connector).
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _handle_event(self, event: dict, on_message):
+    async def _handle_event(self, event: dict, on_message, session: aiohttp.ClientSession):
         event_type = event.get("event", "")
 
         if event_type == "ai_agent_rpc_request":
@@ -273,6 +338,7 @@ class MattermostClient:
         text = post.get("message", "")
         post_id = post.get("id", "")
         root_id = post.get("root_id", "") or post_id
+        file_ids = post.get("file_ids") or []
 
         # Ignore own messages
         if sender_id == self.bot_user_id:
@@ -291,6 +357,18 @@ class MattermostClient:
         sender_name = user.get("username", sender_id)
         sender_email = user.get("email", "")
 
+        # Pre-download any attached files to the agent's workspace so
+        # the agent's Read tool can open them. Relative paths so the
+        # same string works on host and in the container.
+        attachments = await self._download_attachments(session, post_id, file_ids)
+
         clean_text = text.replace(f"@{self.bot_username}", "").strip()
-        self.logger.info(f"[{'dm' if is_dm else 'mention' if is_mention else 'channel'}] [{channel_name}] @{sender_name}: {clean_text}")
-        await on_message(channel_id, channel_name, sender_name, sender_email, clean_text, root_id, is_dm or is_mention)
+        attach_summary = f" +{len(attachments)} attachment(s)" if attachments else ""
+        self.logger.info(
+            f"[{'dm' if is_dm else 'mention' if is_mention else 'channel'}] "
+            f"[{channel_name}] @{sender_name}:{attach_summary} {clean_text}"
+        )
+        await on_message(
+            channel_id, channel_name, sender_name, sender_email,
+            clean_text, root_id, is_dm or is_mention, attachments,
+        )

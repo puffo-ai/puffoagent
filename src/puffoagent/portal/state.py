@@ -50,6 +50,32 @@ def archived_dir() -> Path:
     return home_dir() / "archived"
 
 
+def docker_dir() -> Path:
+    """Root for puffoagent-owned docker state.
+
+    Separate from the host user's ``~/.claude`` so bot activity
+    (sessions, caches, history) stays contained and doesn't pollute
+    the user's personal Claude Code state.
+    """
+    return home_dir() / "docker"
+
+
+def docker_creds_dir() -> Path:
+    """OAuth credentials dir bind-mounted into every cli-docker
+    container at ``/home/agent/.claude``. Seeded once from the host's
+    ``~/.claude`` on first cli-docker worker start.
+    """
+    return docker_dir() / "creds"
+
+
+def docker_shared_dir() -> Path:
+    """Shared content all cli-docker agents can reference:
+    CLAUDE.md primer, rules/, skills/. Folded into each agent's
+    workspace/.claude/CLAUDE.md at worker startup.
+    """
+    return docker_dir() / "shared"
+
+
 def daemon_yml_path() -> Path:
     return home_dir() / "daemon.yml"
 

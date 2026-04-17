@@ -218,9 +218,13 @@ class ClaudeSession:
             "--output-format", "stream-json",
             "--verbose",
         ]
-        if system_prompt:
-            args.extend(["--append-system-prompt", system_prompt])
-            self._system_prompt_seen = system_prompt
+        # The role / system prompt is NOT passed on argv. The worker
+        # writes it (plus shared primer and memory snapshot) to
+        # <cwd>/.claude/CLAUDE.md, which Claude Code auto-discovers at
+        # startup via its project-level file lookup. We keep the
+        # ``system_prompt`` parameter around for symmetry with SDK /
+        # chat-only but it's only captured for diagnostics here.
+        self._system_prompt_seen = system_prompt or None
         if self._session_id:
             args.extend(["--resume", self._session_id])
 

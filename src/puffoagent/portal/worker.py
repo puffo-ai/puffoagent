@@ -21,6 +21,13 @@ from ..agent.adapters import Adapter
 from ..agent.core import PuffoAgent
 from ..agent.file_browser import FileBrowser
 from ..agent.mattermost_client import MattermostClient
+from ..agent.shared_content import (
+    assemble_claude_md,
+    ensure_shared_primer,
+    read_memory_snapshot,
+    read_shared_primer,
+    write_claude_md,
+)
 from .state import (
     AgentConfig,
     DaemonConfig,
@@ -28,6 +35,8 @@ from .state import (
     RuntimeState,
     agent_dir,
     cli_session_json_path,
+    docker_creds_dir,
+    docker_shared_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +85,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             workspace_dir=str(agent_cfg.resolve_workspace_dir()),
             claude_dir=str(agent_cfg.resolve_claude_dir()),
             session_file=str(cli_session_json_path(agent_cfg.id)),
+            creds_dir=str(docker_creds_dir()),
         )
 
     if kind == "cli-local":
@@ -174,22 +184,31 @@ class Worker:
             Path(workspace_path).mkdir(parents=True, exist_ok=True)
             _seed_claude_dir(Path(claude_path))
 
-            # Skills layer daemon-wide first (shared conventions) then
-            # per-agent (overrides + private skills). SkillsLoader
-            # dedupes by filename with first-write-wins, so agents can
-            # shadow a daemon skill by dropping a same-named file in
-            # their own .claude/skills/.
-            skills_dirs = [
-                s for s in [
-                    self.daemon_cfg.skills_dir,
-                    str(Path(claude_path) / "skills"),
-                ] if s
-            ]
+            # Assemble this agent's CLAUDE.md from the shared primer +
+            # profile + memory snapshot. Single source of truth for
+            # all three agentic runtimes: SDK/chat-only read this
+            # string via PuffoAgent's system-prompt builder, cli-local
+            # and cli-docker let Claude Code auto-discover the file
+            # via <cwd>/.claude/CLAUDE.md. Regenerates on every worker
+            # start so pause/resume picks up edits.
+            shared_path = docker_shared_dir()
+            ensure_shared_primer(shared_path)
+            primer = read_shared_primer(shared_path)
+            try:
+                profile_text = Path(profile_path).read_text(encoding="utf-8")
+            except OSError:
+                profile_text = ""
+            claude_md = assemble_claude_md(
+                shared_primer=primer,
+                profile=profile_text,
+                memory_snapshot=read_memory_snapshot(Path(memory_path)),
+            )
+            write_claude_md(Path(workspace_path), claude_md)
+
             puffo = PuffoAgent(
                 adapter=self._adapter,
-                profile_path=profile_path,
+                system_prompt=claude_md,
                 memory_dir=memory_path,
-                skills_dirs=skills_dirs,
                 workspace_dir=workspace_path,
                 claude_dir=claude_path,
                 agent_id=agent_id,
@@ -200,6 +219,7 @@ class Worker:
                 profile_name=Path(profile_path).stem,
                 file_server_url="",
                 agent_id=agent_id,
+                workspace_dir=workspace_path,
             )
             client.set_rpc_handler(FileBrowser(str(agent_dir(agent_id))))
         except Exception as e:
@@ -209,11 +229,12 @@ class Worker:
             self.runtime.save(agent_id)
             return
 
-        async def on_message(channel_id, channel_name, sender, sender_email, text, root_id, direct):
+        async def on_message(channel_id, channel_name, sender, sender_email, text, root_id, direct, attachments):
             typing_task = asyncio.ensure_future(_keep_typing(client, channel_id, root_id))
             try:
                 reply = await puffo.handle_message(
                     channel_id, channel_name, sender, sender_email, text, direct,
+                    attachments=attachments,
                 )
             except Exception as exc:
                 logger.error("agent %s: handle_message error: %s", agent_id, exc, exc_info=True)

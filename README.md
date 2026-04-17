@@ -251,23 +251,41 @@ Everything lives under `~/.puffoagent/` (override with the `PUFFOAGENT_HOME` env
 
 ```
 ~/.puffoagent/
-  daemon.yml              # LLM keys + server URL + user token
-  daemon.pid              # current daemon process id
+  daemon.yml                # LLM keys + server URL + user token
+  daemon.pid                # current daemon process id
+  docker/                   # cli-docker plumbing (seeded on first use)
+    creds/                  # OAuth state bind-mounted into every cli-docker agent's
+                            #   container as /home/agent/.claude. Seeded from the
+                            #   host's ~/.claude; keeps bot activity separate.
+    shared/                 # shared context inlined into every agent's CLAUDE.md
+      CLAUDE.md             #   canonical puffo primer (editable)
+      README.md             #   how to customise
   agents/
     <id>/
-      agent.yml           # bot token, runtime kind, state, triggers
-      profile.md          # role / system prompt
-      memory/             # per-agent memory + token_usage.json
-      workspace/          # project root the agent operates in (cwd for tools)
-        .claude/          # Claude Code project-level conventions
-          agents/         # subagent defs (sdk / cli runtimes)
-          commands/       # custom slash commands
-          skills/         # per-agent skills
-          hooks/          # lifecycle hooks
-      runtime.json        # live stats written by the worker
+      agent.yml             # bot token, runtime kind, state, triggers
+      profile.md            # the agent's role / soul (what you edit)
+      memory/               # per-agent memory + token_usage.json
+      workspace/            # project root the agent operates in (cwd for tools)
+        .claude/            # Claude Code project-level conventions
+          CLAUDE.md         #   generated at worker start from shared + profile + memory
+          agents/           #   subagent defs (sdk / cli runtimes)
+          commands/         #   custom slash commands
+          skills/           #   per-agent skills
+          hooks/            #   lifecycle hooks
+          rules/            #   reference docs
+        attachments/        # auto-downloaded files from Mattermost messages
+          <post_id>/        #   one dir per incoming post with attachments
+      cli_session.json      # cli-local / cli-docker: Claude Code session id (for --resume)
+      runtime.json          # live stats written by the worker
   archived/
-    <id>-<timestamp>/     # agents you archived
+    <id>-<timestamp>/       # agents you archived
 ```
+
+### How an agent sees the world
+
+- **Your role** lives in `profile.md`. At worker start the daemon folds it into a generated `workspace/.claude/CLAUDE.md` along with the shared puffo primer (`docker/shared/CLAUDE.md`) and a snapshot of your `memory/` directory. That's your system prompt — `sdk` and `chat-only` see it as a string, `cli-local` / `cli-docker` let Claude Code auto-discover it via project-level file lookup. Edit `profile.md` freely; pause + resume to re-generate.
+- **Attachments** on incoming Mattermost posts are auto-downloaded by the daemon to `workspace/attachments/<post_id>/<filename>`. The message preamble includes their relative paths so the agent can open them with its `Read` tool — works identically on host and inside the cli-docker container (paths are `workspace`-relative).
+- **Memory** snapshots are taken at worker start. Writing memory mid-session doesn't propagate until the next restart; pause + resume to refresh.
 
 The CLI is file-driven: creating an agent writes files; pausing flips a `state` field; the daemon's reconciler notices and acts within a couple of seconds. No IPC port.
 
