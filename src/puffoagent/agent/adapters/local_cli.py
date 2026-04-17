@@ -107,6 +107,14 @@ class LocalCLIAdapter(Adapter):
             return
         await session.warm(system_prompt)
 
+    async def reload(self, new_system_prompt: str) -> None:
+        """Close the long-lived claude subprocess so the next
+        ``run_turn`` spawns a fresh one that re-reads CLAUDE.md.
+        """
+        if self._session is not None:
+            await self._session.aclose()
+            self._session = None
+
     async def aclose(self) -> None:
         if self._session is not None:
             await self._session.aclose()

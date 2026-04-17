@@ -189,6 +189,16 @@ class DockerCLIAdapter(Adapter):
             return
         await session.warm(system_prompt)
 
+    async def reload(self, new_system_prompt: str) -> None:
+        """Close the in-container claude subprocess so the next
+        ``run_turn`` spawns a fresh one that re-reads CLAUDE.md.
+        The container stays up — we don't pay container cold-start
+        on every reload.
+        """
+        if self._session is not None:
+            await self._session.aclose()
+            self._session = None
+
     async def aclose(self) -> None:
         if self._session is not None:
             await self._session.aclose()

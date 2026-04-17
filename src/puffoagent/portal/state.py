@@ -502,5 +502,14 @@ def clear_daemon_pid() -> None:
 def _atomic_write_yaml(path: Path, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+        # ``allow_unicode=True`` keeps non-ASCII characters as real
+        # UTF-8 in the file rather than escaping to ``\uXXXX`` — much
+        # easier to eyeball agent.yml when display_name is CJK /
+        # emoji / accented etc.
+        yaml.safe_dump(
+            data, f,
+            sort_keys=False,
+            default_flow_style=False,
+            allow_unicode=True,
+        )
     os.replace(tmp, path)

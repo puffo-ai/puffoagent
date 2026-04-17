@@ -109,6 +109,13 @@ reading context you don't have — use the `puffo` MCP tools. See
 - `mcp__puffo__fetch_channel_files(channel, limit=20)` — back-fill
   attachments from recent channel history into your workspace.
 
+**Self-management:**
+- `mcp__puffo__reload_system_prompt()` — rebuild your system prompt
+  from disk + restart your claude subprocess so fresh edits to
+  CLAUDE.md / profile / memory take effect on your next message.
+  Conversation history survives via ``--resume``. See the
+  `reload-system-prompt` skill for when to use.
+
 Use the write tools sparingly and with intent — messages you post
 proactively will surprise people. If a user explicitly asked you to
 notify someone, go ahead; if they didn't, ask first. The read tools
@@ -147,6 +154,32 @@ A snapshot of your memory is included in this CLAUDE.md. If you need
 to remember something across sessions, write it as markdown into the
 `memory/` directory under your agent root. Memory updates take
 effect on the next worker restart (pause/resume the agent to force).
+
+## Your two CLAUDE.md layers (cli-local / cli-docker only)
+
+Claude Code concatenates two files into your system prompt at
+startup:
+
+1. **`~/.claude/CLAUDE.md`** — user-level, **managed by puffoagent**.
+   Contains this primer + your `profile.md` role + your `memory/`
+   snapshot. Regenerated every worker start. **Do not edit** — your
+   changes would be overwritten.
+
+2. **`./CLAUDE.md`** or **`./.claude/CLAUDE.md`** in your workspace —
+   project-level, **you own it**. Puffoagent never touches this file
+   after creating (or not creating) it. Edit it freely to add live
+   notes, durable facts about the project you're working on,
+   personal reminders, or anything you want to surface in your next
+   system prompt. It persists across restarts.
+
+Use layer 2 for fast "write-to-prompt" loops — no round trip through
+`memory/` required. Use `memory/*.md` (which folds into layer 1 on
+restart) when you want the content clearly labelled as memory rather
+than project notes. Both work.
+
+If you run as the `sdk` adapter, you only see layer 1 — `sdk` doesn't
+auto-discover project CLAUDE.md files. Write to `memory/*.md` if you
+want persistence.
 
 ## Permission prompts (cli-local only)
 
@@ -440,6 +473,44 @@ don't re-look-up the same names in a loop.
 """
 
 
+DEFAULT_SKILL_RELOAD = """\
+# Skill: reload_system_prompt
+
+Rebuild your system prompt from disk and restart your claude
+subprocess so fresh edits to your `profile.md`, `memory/*.md`, or
+project-level `CLAUDE.md` take effect on your NEXT message.
+
+**Tool:** `mcp__puffo__reload_system_prompt`
+
+**Arguments:** none.
+
+**When to use:**
+- You just edited your workspace `CLAUDE.md` and want the change in
+  your next system prompt rather than waiting for a daemon restart.
+- You wrote a new `memory/<topic>.md` and want it folded in now.
+- You (or the operator) edited `profile.md` and want the new role
+  live immediately.
+
+**How it works:**
+1. Your current reply goes through normally — the subprocess stays
+   alive until the turn ends.
+2. When the next message arrives, the daemon regenerates your
+   managed `~/.claude/CLAUDE.md` (shared primer + profile + memory),
+   closes your claude subprocess, spawns a new one with `--resume`
+   pointing at your existing session id, and then runs the turn.
+3. Conversation history is preserved; the system prompt is fresh.
+
+**Caveat:** the reload does NOT run retroactively on the message you
+used to call it. Expect one "free" message between edit and effect.
+
+**When NOT to use:**
+- Every turn — the reload has a real cost (tear down + re-spawn ~5s
+  for cli-docker). Batch your edits and call reload once.
+- To force a fresh conversation — this preserves history via
+  `--resume`. Ask the operator if you actually want a new session.
+"""
+
+
 DEFAULT_SKILLS: dict[str, str] = {
     "send-message.md": DEFAULT_SKILL_SEND_MESSAGE,
     "upload-file.md": DEFAULT_SKILL_UPLOAD_FILE,
@@ -450,6 +521,7 @@ DEFAULT_SKILLS: dict[str, str] = {
     "fetch-channel-files.md": DEFAULT_SKILL_FETCH_CHANNEL_FILES,
     "get-post.md": DEFAULT_SKILL_GET_POST,
     "get-user-info.md": DEFAULT_SKILL_GET_USER_INFO,
+    "reload-system-prompt.md": DEFAULT_SKILL_RELOAD,
 }
 
 
@@ -552,12 +624,43 @@ def assemble_claude_md(
     return "\n\n".join(parts) + "\n"
 
 
-def write_claude_md(workspace_dir: Path, content: str) -> Path:
-    """Write ``content`` to ``<workspace>/.claude/CLAUDE.md``. Makes
-    the target directory if needed. Returns the written path.
+def write_claude_md(claude_dir: Path, content: str) -> Path:
+    """Write ``content`` to ``<claude_dir>/CLAUDE.md``. Makes the
+    target directory if needed. Returns the written path.
+
+    Callers should pass the USER-level claude dir of each agent's
+    virtual home (e.g. ``agents/<id>/.claude/``), NOT the
+    project-level ``workspace/.claude/``. Writing to the user-level
+    location lets Claude Code auto-discover this file via the
+    standard ``$HOME/.claude/CLAUDE.md`` lookup, and leaves
+    ``<workspace>/CLAUDE.md`` as the agent's own editable
+    project-level layer.
     """
-    claude_dir = workspace_dir / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     path = claude_dir / "CLAUDE.md"
     path.write_text(content, encoding="utf-8")
     return path
+
+
+# Marker: first line of the default shared primer. Used on worker
+# startup to detect a *previously-generated* managed CLAUDE.md at
+# the old project-level location, so we can remove it during the
+# one-time migration to Option D (user-level managed, project-level
+# agent-owned). We only delete files we recognise as ours.
+_MANAGED_CLAUDE_MD_MARKER = "# Puffo.ai platform primer"
+
+
+def looks_like_managed_claude_md(path: Path) -> bool:
+    """Return True if ``path`` begins with our managed-content
+    marker — i.e. it was generated by ``write_claude_md`` in a
+    previous worker start. Used to distinguish stale managed files
+    we can safely delete from agent-authored content we must not
+    touch.
+    """
+    if not path.is_file():
+        return False
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return False
+    return first_line.strip().startswith(_MANAGED_CLAUDE_MD_MARKER)

@@ -24,6 +24,7 @@ from ..agent.mattermost_client import MattermostClient
 from ..agent.shared_content import (
     assemble_claude_md,
     ensure_shared_primer,
+    looks_like_managed_claude_md,
     read_memory_snapshot,
     read_shared_primer,
     sync_shared_skills,
@@ -34,6 +35,7 @@ from .state import (
     DaemonConfig,
     RuntimeConfig,
     RuntimeState,
+    agent_claude_user_dir,
     agent_dir,
     agent_home_dir,
     cli_session_json_path,
@@ -202,13 +204,15 @@ class Worker:
             Path(workspace_path).mkdir(parents=True, exist_ok=True)
             _seed_claude_dir(Path(claude_path))
 
-            # Assemble this agent's CLAUDE.md from the shared primer +
-            # profile + memory snapshot. Single source of truth for
-            # all three agentic runtimes: SDK/chat-only read this
-            # string via PuffoAgent's system-prompt builder, cli-local
-            # and cli-docker let Claude Code auto-discover the file
-            # via <cwd>/.claude/CLAUDE.md. Regenerates on every worker
-            # start so pause/resume picks up edits.
+            # Assemble this agent's managed CLAUDE.md from the
+            # shared primer + profile + memory snapshot. Written to
+            # the USER-level claude dir (<agent_home>/.claude/
+            # CLAUDE.md), so Claude Code auto-discovers it as
+            # ``$HOME/.claude/CLAUDE.md`` on subprocess spawn. The
+            # project-level ``<workspace>/CLAUDE.md`` is deliberately
+            # left untouched — that's the agent's own editable layer.
+            # SDK/chat-only adapters don't auto-discover, so we also
+            # hand the string to PuffoAgent as ``system_prompt``.
             shared_path = docker_shared_dir()
             ensure_shared_primer(shared_path)
             sync_shared_skills(shared_path, Path(workspace_path))
@@ -222,7 +226,29 @@ class Worker:
                 profile=profile_text,
                 memory_snapshot=read_memory_snapshot(Path(memory_path)),
             )
-            write_claude_md(Path(workspace_path), claude_md)
+            write_claude_md(agent_claude_user_dir(agent_id), claude_md)
+
+            # One-time migration: earlier versions wrote the managed
+            # CLAUDE.md into ``<workspace>/.claude/CLAUDE.md``. If
+            # that file still exists and starts with our managed-
+            # content marker, delete it — otherwise Claude Code
+            # would see the primer doubled (once user-level, once
+            # project-level) and the agent loses the ability to own
+            # the project-level layer. We ONLY delete files we
+            # recognise as ours.
+            old_managed = Path(claude_path) / "CLAUDE.md"
+            if looks_like_managed_claude_md(old_managed):
+                try:
+                    old_managed.unlink()
+                    logger.info(
+                        "agent %s: migrated stale managed CLAUDE.md out of %s",
+                        agent_id, old_managed,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "agent %s: could not remove stale %s: %s",
+                        agent_id, old_managed, exc,
+                    )
 
             puffo = PuffoAgent(
                 adapter=self._adapter,
@@ -260,10 +286,29 @@ class Worker:
                 agent_id, exc,
             )
 
+        reload_flag_path = Path(workspace_path) / ".puffoagent" / "reload.flag"
+
         async def on_message(
             channel_id, channel_name, sender, sender_email, text,
             root_id, direct, attachments, sender_is_bot, mentions,
         ):
+            # Agent can drop a reload flag via the reload_system_prompt
+            # MCP tool. Honour it BEFORE the turn so the first message
+            # after the flag-drop picks up fresh CLAUDE.md / profile /
+            # memory content. Flag-drop happens DURING a turn so we
+            # can't act within that turn — the next one is the earliest
+            # we can reload.
+            if reload_flag_path.exists():
+                await _reload_from_disk(
+                    agent_id=agent_id,
+                    shared_path=shared_path,
+                    profile_path=profile_path,
+                    memory_path=memory_path,
+                    workspace_path=workspace_path,
+                    puffo=puffo,
+                    adapter=self._adapter,
+                    flag_path=reload_flag_path,
+                )
             typing_task = asyncio.ensure_future(_keep_typing(client, channel_id, root_id))
             try:
                 reply = await puffo.handle_message(
@@ -329,6 +374,53 @@ async def _keep_typing(client: MattermostClient, channel_id: str, parent_id: str
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
+
+
+async def _reload_from_disk(
+    *,
+    agent_id: str,
+    shared_path: Path,
+    profile_path: str,
+    memory_path: str,
+    workspace_path: str,
+    puffo,
+    adapter,
+    flag_path: Path,
+) -> None:
+    """Rebuild the agent's managed CLAUDE.md from the current disk
+    state (shared primer + profile.md + memory snapshot), update the
+    shell's cached ``system_prompt``, then ask the adapter to drop any
+    cached subprocess so the next turn re-reads CLAUDE.md.
+
+    Called by ``on_message`` when the agent has set the reload flag
+    via the ``reload_system_prompt`` MCP tool. Failures are logged
+    but don't prevent the turn — a stale prompt is strictly better
+    than a dropped message.
+    """
+    try:
+        ensure_shared_primer(shared_path)
+        sync_shared_skills(shared_path, Path(workspace_path))
+        primer = read_shared_primer(shared_path)
+        try:
+            profile_text = Path(profile_path).read_text(encoding="utf-8")
+        except OSError:
+            profile_text = ""
+        new_md = assemble_claude_md(
+            shared_primer=primer,
+            profile=profile_text,
+            memory_snapshot=read_memory_snapshot(Path(memory_path)),
+        )
+        write_claude_md(agent_claude_user_dir(agent_id), new_md)
+        puffo.system_prompt = new_md
+        await adapter.reload(new_md)
+        logger.info("agent %s: reloaded system prompt from disk", agent_id)
+    except Exception as exc:
+        logger.warning("agent %s: reload failed: %s", agent_id, exc)
+    finally:
+        try:
+            flag_path.unlink()
+        except OSError:
+            pass
 
 
 _CLAUDE_DIR_SUBDIRS = ("agents", "commands", "skills", "hooks")

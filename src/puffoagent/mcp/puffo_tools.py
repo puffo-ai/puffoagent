@@ -39,6 +39,11 @@ Tools exposed (prefixed ``mcp__puffo__`` when invoked from claude):
         Look up a user by @-handle. Returns username, display name,
         email, and bot/human type.
 
+    reload_system_prompt()
+        Ask the daemon to rebuild your CLAUDE.md from disk and
+        restart your claude subprocess so fresh edits to your
+        profile/memory/CLAUDE.md take effect on your next message.
+
     approve_permission(tool_name, input)
         (cli-local permission proxy.) Post a permission request to the
         owner's DM and poll for a reply ('y'/'n'/'approve'/'deny') up
@@ -228,7 +233,15 @@ async def _upload_file_bytes(
     channel_id: str,
     file_path: Path,
 ) -> list[str]:
-    """POST /api/v4/files, return the list of file_ids to attach."""
+    """POST /api/v4/files, return the list of file_ids to attach.
+
+    Mattermost's file-upload handler validates ``channel_id`` AND
+    ``filename`` as URL query parameters *before* parsing the
+    multipart body — recent server versions return
+    ``api.context.invalid_url_param.app_error`` if either field is
+    only in the form data. We put both in query + form so the call
+    works across server versions.
+    """
     data = aiohttp.FormData()
     data.add_field("channel_id", channel_id)
     data.add_field(
@@ -241,7 +254,9 @@ async def _upload_file_bytes(
     headers = {"Authorization": f"Bearer {cfg.token}"}
     async with session.post(
         cfg.url.rstrip("/") + "/api/v4/files",
-        data=data, headers=headers,
+        params={"channel_id": channel_id, "filename": file_path.name},
+        data=data,
+        headers=headers,
     ) as resp:
         if resp.status not in (200, 201):
             body = await resp.text()
@@ -595,6 +610,47 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             f"display: {display}\n"
             f"email: {user.get('email', '')}\n"
             f"type: {kind}"
+        )
+
+    @mcp.tool()
+    async def reload_system_prompt() -> str:
+        """Rebuild your system prompt from disk and restart your
+        claude subprocess so fresh edits take effect on your next
+        message.
+
+        **When to use:**
+        - You just edited your project-level ``/workspace/CLAUDE.md``
+          (or ``/workspace/.claude/CLAUDE.md``) and want it in your
+          next system prompt.
+        - You wrote a new ``memory/*.md`` file under your agent dir
+          and want it folded into the managed layer immediately.
+        - You edited ``profile.md`` and want the new role live.
+
+        **What happens:**
+        1. Your current reply goes through as normal (the subprocess
+           stays alive for this turn).
+        2. On the NEXT incoming message, the daemon regenerates your
+           managed ``~/.claude/CLAUDE.md`` from shared primer +
+           profile + memory, closes your claude subprocess, and
+           spawns a new one with ``--resume`` pointing at your
+           existing session — so conversation history is preserved
+           while the system prompt is fresh.
+
+        No arguments. Returns a short confirmation.
+        """
+        flag_path = Path(cfg.workspace) / ".puffoagent" / "reload.flag"
+        try:
+            flag_path.parent.mkdir(parents=True, exist_ok=True)
+            flag_path.write_text(
+                f'{{"requested_at": {int(time.time())}}}\n',
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise RuntimeError(f"could not write reload flag: {exc}") from exc
+        return (
+            "reload requested — your system prompt will be rebuilt and "
+            "your claude subprocess restarted before your next message "
+            "(conversation history preserved via --resume)."
         )
 
     @mcp.tool()

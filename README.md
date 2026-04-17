@@ -20,7 +20,7 @@ Everything runs on *your* machine: the daemon, the LLM calls, and any tool execu
 ### 1. Install the daemon
 
 ```bash
-pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.3.0-py3-none-any.whl
+pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.3.1-py3-none-any.whl
 ```
 
 On Windows, pip installs `puffoagent.exe` under `%APPDATA%\Python\Python311\Scripts\`. If that directory isn't on your PATH, either add it once via `[Environment]::SetEnvironmentVariable(...)` or invoke the binary by its full path.

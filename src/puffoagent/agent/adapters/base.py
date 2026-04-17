@@ -68,6 +68,22 @@ class Adapter(ABC):
         """
         return None
 
+    async def reload(self, new_system_prompt: str) -> None:
+        """Drop any cached claude-subprocess state so the next turn
+        picks up fresh content from disk (CLAUDE.md layers, profile,
+        memory). The worker calls this between turns when the agent
+        triggered a reload via the ``reload_system_prompt`` MCP tool.
+
+        Implementation note: CLI adapters close the long-lived claude
+        subprocess (keeping the container alive for cli-docker); the
+        next ``run_turn`` spawns a new subprocess that re-reads all
+        CLAUDE.md layers on startup. SDK and chat-only adapters pass
+        ``system_prompt`` per-turn anyway, so the shell updating its
+        own ``system_prompt`` is all that's needed — default no-op
+        here is correct for them.
+        """
+        return None
+
     async def aclose(self) -> None:
         """Release any runtime resources (containers, subprocesses, MCP
         servers). Default is a no-op for stateless adapters.

@@ -371,6 +371,207 @@ def _set_agent_state(agent_id: str, new_state: str) -> int:
     return 0
 
 
+def cmd_agent_rename(args: argparse.Namespace) -> int:
+    """Change an agent's display name.
+
+    Mattermost bot users render their ``first_name`` as the chat
+    display name (``displayUsername()`` in the webapp prefers
+    ``getFullName(user)`` for bots). We patch the bot user's
+    ``first_name`` via ``PUT /api/v4/users/<bot-user-id>/patch``
+    using the bot's own token — no admin user-token required, no
+    puffo-specific server endpoint needed. Also mirror the new name
+    into ``agent.yml`` so ``agent show`` reflects it immediately.
+
+    Note: the server's AIAgents table has its own ``display_name``
+    column that this command does NOT update — that would require a
+    puffo-ai server-side endpoint. Until that lands, the next sync
+    tick will overwrite local ``agent.yml`` with the (still old)
+    aiagent display_name. The chat-visible name stays correct
+    regardless because that reads from the bot user's first_name.
+    """
+    agent_id = args.id
+    new_name = (args.display_name or "").strip()
+    if not new_name:
+        print("error: display_name cannot be empty", file=sys.stderr)
+        return 2
+    if not agent_yml_path(agent_id).exists():
+        print(f"error: agent {agent_id!r} not found", file=sys.stderr)
+        return 2
+    cfg = AgentConfig.load(agent_id)
+    # Mattermost refuses to let a bot patch its own profile (403
+    # api.context.permissions.app_error), so we use the operator's
+    # admin user token from daemon.yml instead. That token has
+    # owner/admin rights over bots they own.
+    daemon = DaemonConfig.load()
+    if not daemon.has_server_sync():
+        print(
+            "error: not logged in to a Puffo.ai server. run "
+            "`puffoagent login --url ... --token ...` first so we "
+            "have an admin token to rename the bot with.",
+            file=sys.stderr,
+        )
+        return 2
+    bot_user_id = _resolve_bot_user_id(cfg.mattermost)
+    if not bot_user_id:
+        print("error: could not resolve bot user id — is the bot token valid?", file=sys.stderr)
+        return 2
+    ok, err = _patch_user_first_name(
+        cfg.mattermost.url, daemon.server.user_token,
+        bot_user_id, new_name,
+    )
+    if not ok:
+        print(f"error: server rejected rename ({err})", file=sys.stderr)
+        return 2
+    cfg.display_name = new_name
+    cfg.save()
+    print(f"agent {agent_id!r} display_name set to {new_name!r}")
+    return 0
+
+
+def cmd_agent_avatar(args: argparse.Namespace) -> int:
+    """Upload a profile picture for the agent's underlying bot user.
+
+    Uses the operator's admin user token from ``daemon.yml`` — same
+    reason as ``agent rename``: Mattermost refuses to let a bot
+    modify its own profile (403 api.context.permissions), so the
+    owner performs the change.
+    """
+    agent_id = args.id
+    image_path = Path(args.image).expanduser()
+    if not image_path.is_file():
+        print(f"error: {image_path} is not a file", file=sys.stderr)
+        return 2
+    if image_path.stat().st_size > 5 * 1024 * 1024:
+        print(
+            f"error: {image_path} is {image_path.stat().st_size // 1024}KB — "
+            "mattermost rejects profile images over 5MB",
+            file=sys.stderr,
+        )
+        return 2
+    if not agent_yml_path(agent_id).exists():
+        print(f"error: agent {agent_id!r} not found", file=sys.stderr)
+        return 2
+    cfg = AgentConfig.load(agent_id)
+    daemon = DaemonConfig.load()
+    if not daemon.has_server_sync():
+        print(
+            "error: not logged in to a Puffo.ai server. run "
+            "`puffoagent login --url ... --token ...` first so we "
+            "have an admin token to update the bot's avatar with.",
+            file=sys.stderr,
+        )
+        return 2
+    bot_user_id = _resolve_bot_user_id(cfg.mattermost)
+    if not bot_user_id:
+        print("error: could not resolve bot user id — is the bot token valid?", file=sys.stderr)
+        return 2
+    ok, err = _upload_profile_image(
+        cfg.mattermost.url, daemon.server.user_token,
+        bot_user_id, image_path,
+    )
+    if not ok:
+        print(f"error: image upload failed ({err})", file=sys.stderr)
+        return 2
+    print(f"agent {agent_id!r} avatar updated from {image_path.name}")
+    return 0
+
+
+def _resolve_bot_user_id(mm) -> str:
+    """Call GET /users/me with the bot token to recover the bot's
+    user id. Returns empty string on any failure.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+    req = urllib.request.Request(
+        mm.url.rstrip("/") + "/api/v4/users/me",
+        headers={"Authorization": f"Bearer {mm.bot_token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        return data.get("id", "")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
+        return ""
+
+
+def _patch_user_first_name(
+    url: str, bot_token: str, bot_user_id: str, first_name: str,
+) -> tuple[bool, str]:
+    """PUT /api/v4/users/<id>/patch with a new first_name. This is
+    a standard Mattermost v4 endpoint so no puffo-specific server
+    changes are needed. The bot's own token is sufficient to patch
+    its own profile.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+    body = _json.dumps({"first_name": first_name}).encode("utf-8")
+    req = urllib.request.Request(
+        url.rstrip("/") + f"/api/v4/users/{bot_user_id}/patch",
+        data=body,
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {bot_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True, ""
+    except urllib.error.HTTPError as exc:
+        tail = exc.read().decode("utf-8", errors="replace")[:200]
+        return False, f"{exc.code} {tail}"
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return False, str(exc)
+
+
+def _upload_profile_image(
+    url: str, bot_token: str, bot_user_id: str, image_path: Path,
+) -> tuple[bool, str]:
+    """POST /api/v4/users/<bot_user_id>/image with the image as a
+    multipart field named ``image``. Uses stdlib so this CLI path
+    works without pulling aiohttp in to the main process.
+    """
+    import mimetypes
+    import urllib.request
+    import urllib.error
+    import uuid
+
+    boundary = f"----puffoagent{uuid.uuid4().hex}"
+    mime = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+    file_bytes = image_path.read_bytes()
+
+    preamble = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="image"; filename="{image_path.name}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n"
+    ).encode("utf-8")
+    trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = preamble + file_bytes + trailer
+
+    req = urllib.request.Request(
+        url.rstrip("/") + f"/api/v4/users/{bot_user_id}/image",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {bot_token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+        return True, ""
+    except urllib.error.HTTPError as exc:
+        tail = exc.read().decode("utf-8", errors="replace")[:200]
+        return False, f"{exc.code} {tail}"
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return False, str(exc)
+
+
 def cmd_agent_runtime(args: argparse.Namespace) -> int:
     """Update the runtime: block in an agent's agent.yml without needing
     a text editor. Every field is optional — only the ones you pass get
@@ -604,6 +805,28 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("id")
     edit.set_defaults(func=cmd_agent_edit)
 
+    rename = agent_sub.add_parser(
+        "rename",
+        help="Change the agent's display name (server-side + local)",
+    )
+    rename.add_argument("id")
+    rename.add_argument(
+        "display_name",
+        help="New display name. UTF-8 / CJK / emoji are fine.",
+    )
+    rename.set_defaults(func=cmd_agent_rename)
+
+    avatar = agent_sub.add_parser(
+        "avatar",
+        help="Set the agent bot's profile picture from an image file",
+    )
+    avatar.add_argument("id")
+    avatar.add_argument(
+        "image",
+        help="Path to PNG/JPEG image (Mattermost recommends square, under 5MB)",
+    )
+    avatar.set_defaults(func=cmd_agent_avatar)
+
     export = agent_sub.add_parser("export", help="Export agent profile + memory + config as a zip")
     export.add_argument("id")
     export.add_argument("dest", help="Destination .zip file")
@@ -613,6 +836,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Force UTF-8 on stdout/stderr so non-ASCII display names, profile
+    # excerpts, and Mattermost message bodies render correctly on
+    # Windows consoles, which default to cp1252/cp936. Best-effort —
+    # some Python distros (notably pyinstaller bundles) expose a
+    # stdout without reconfigure(), so ignore any AttributeError.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
