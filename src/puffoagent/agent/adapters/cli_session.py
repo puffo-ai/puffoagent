@@ -1,4 +1,4 @@
-"""Long-lived ``claude`` CLI session.
+"""Long-lived ``claude`` CLI session with audit logging.
 
 Spawned once per agent, fed one user message per turn, kept alive
 across turns. The ``claude`` process speaks newline-delimited JSON on
@@ -34,12 +34,71 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from .base import TurnResult
 
 logger = logging.getLogger(__name__)
+
+
+# Cap any single audit field at this many characters so one huge user
+# message or tool input doesn't bloat the log or the docker-logs
+# stream. Truncation is marked with `... (truncated)`.
+AUDIT_FIELD_MAX = 2000
+
+
+class AuditLog:
+    """Per-agent ndjson audit log.
+
+    Every line is one event (session.start, turn.input, tool,
+    assistant.text, turn.end, session.error, ...). Living inside the
+    agent's workspace is intentional — the workspace is bind-mounted
+    into the cli-docker container, so the same file feeds the
+    container's ``tail -F`` PID 1 and ``docker logs``.
+    """
+
+    def __init__(self, path: Path, agent_id: str):
+        self.path = path
+        self.agent_id = agent_id
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Ensure the file exists so the container's tail starts
+            # cleanly even if no turn has happened yet.
+            self.path.touch(exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "agent %s: cannot prepare audit log at %s: %s",
+                agent_id, path, exc,
+            )
+
+    def write(self, event: str, **fields) -> None:
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "agent": self.agent_id,
+            "event": event,
+            **{k: _truncate(v) for k, v in fields.items()},
+        }
+        try:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            # Audit failure must not kill the turn.
+            logger.warning(
+                "agent %s: audit log write failed: %s",
+                self.agent_id, exc,
+            )
+
+
+def _truncate(v):
+    if isinstance(v, str) and len(v) > AUDIT_FIELD_MAX:
+        return v[:AUDIT_FIELD_MAX] + "... (truncated)"
+    if isinstance(v, dict):
+        return {k: _truncate(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_truncate(x) for x in v]
+    return v
 
 
 # Seconds to wait for the init event after spawn before giving up.
@@ -63,6 +122,7 @@ class ClaudeSession:
         build_command: Callable[[list[str]], list[str]],
         cwd: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
+        audit: Optional["AuditLog"] = None,
     ):
         """
         ``build_command(extra_args)`` is called with a list of extra
@@ -71,12 +131,16 @@ class ClaudeSession:
         ``["claude", "--dangerously-skip-permissions", ...]``; for
         cli-docker it prepends ``["docker", "exec", "-i", name,
         "claude", "--dangerously-skip-permissions", ...]``.
+
+        ``audit`` is optional. When provided, each turn appends
+        structured events for operators to tail.
         """
         self.agent_id = agent_id
         self.session_file = session_file
         self.build_command = build_command
         self.cwd = cwd
         self.env = env
+        self.audit = audit
 
         self._proc: asyncio.subprocess.Process | None = None
         self._system_prompt_seen: str | None = None
@@ -145,7 +209,15 @@ class ClaudeSession:
             await self._spawn(system_prompt)
 
     async def _spawn(self, system_prompt: str) -> None:
-        args = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        # --verbose is required whenever --output-format stream-json is
+        # combined with --print / streaming input. Claude CLI rejects
+        # the combo otherwise with:
+        #   "When using --print, --output-format=stream-json requires --verbose"
+        args = [
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+        ]
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
             self._system_prompt_seen = system_prompt
@@ -165,12 +237,17 @@ class ClaudeSession:
             cwd=self.cwd,
             env=self.env,
         )
-        # Drain stderr in the background so its pipe never backpressures.
-        self._stderr_drain_task = asyncio.ensure_future(self._drain_stderr(self._proc))
-
+        if self.audit is not None:
+            self.audit.write(
+                "session.start",
+                resume=bool(self._session_id),
+                session_id=self._session_id or "",
+            )
         # Try to capture session_id from init. We time out gracefully:
         # if the CLI version delays init, we'll pick the id up from
-        # the first result event instead.
+        # the first result event instead. Stderr is drained ONLY after
+        # a successful init so the failure path can read it for
+        # diagnostics.
         try:
             sid = await asyncio.wait_for(
                 self._read_init(self._proc), timeout=INIT_TIMEOUT_SECONDS,
@@ -180,16 +257,30 @@ class ClaudeSession:
                 "agent %s: no init event within %.1fs; will capture session_id from first result",
                 self.agent_id, INIT_TIMEOUT_SECONDS,
             )
+            self._stderr_drain_task = asyncio.ensure_future(self._drain_stderr(self._proc))
             return
         if sid and sid != self._session_id:
             self._save_session_id(sid)
+        self._stderr_drain_task = asyncio.ensure_future(self._drain_stderr(self._proc))
 
     async def _read_init(self, proc: asyncio.subprocess.Process) -> str:
         while True:
             line = await proc.stdout.readline()
             if not line:
                 rc = await proc.wait()
-                raise _ResumeFailed(f"claude exited rc={rc} before init event")
+                # Grab stderr synchronously for the exception message —
+                # no drain task is running yet at this point.
+                stderr_tail = ""
+                if proc.stderr is not None:
+                    try:
+                        buf = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
+                        stderr_tail = buf.decode("utf-8", errors="replace").strip()[-800:]
+                    except asyncio.TimeoutError:
+                        pass
+                raise _ResumeFailed(
+                    f"claude exited rc={rc} before init event"
+                    + (f"; stderr: {stderr_tail}" if stderr_tail else "")
+                )
             event = _parse_event(line)
             if event is None:
                 continue
@@ -204,10 +295,15 @@ class ClaudeSession:
                 line = await proc.stderr.readline()
                 if not line:
                     return
-                logger.debug(
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if not text:
+                    continue
+                # Surface stderr at WARNING by default — most claude
+                # output on stderr is a real complaint worth seeing
+                # without bumping the global log level.
+                logger.warning(
                     "agent %s claude stderr: %s",
-                    self.agent_id,
-                    line.decode("utf-8", errors="replace").rstrip(),
+                    self.agent_id, text,
                 )
         except Exception:
             return
@@ -245,6 +341,9 @@ class ClaudeSession:
 
     async def _one_turn(self, user_message: str) -> TurnResult:
         assert self._proc is not None and self._proc.stdin is not None
+        if self.audit is not None:
+            self.audit.write("turn.input", content=user_message)
+        turn_started_at = time.time()
         frame = {
             "type": "user",
             "message": {"role": "user", "content": user_message},
@@ -264,6 +363,7 @@ class ClaudeSession:
         tool_calls = 0
         input_tokens = 0
         output_tokens = 0
+        event_types_seen: list[str] = []
 
         while True:
             line = await self._proc.stdout.readline()
@@ -275,6 +375,10 @@ class ClaudeSession:
             event = _parse_event(line)
             if event is None:
                 continue
+            event_types_seen.append(
+                f"{event.get('type')}/{event.get('subtype', '-')}"
+            )
+            logger.debug("agent %s stream event: %s", self.agent_id, event)
 
             t = event.get("type")
             if t == "assistant":
@@ -284,9 +388,19 @@ class ClaudeSession:
                         continue
                     bt = block.get("type")
                     if bt == "text":
-                        reply_parts.append(block.get("text", "") or "")
+                        text = block.get("text", "") or ""
+                        reply_parts.append(text)
+                        if self.audit is not None and text:
+                            self.audit.write("assistant.text", text=text)
                     elif bt == "tool_use":
                         tool_calls += 1
+                        if self.audit is not None:
+                            self.audit.write(
+                                "tool",
+                                name=block.get("name", ""),
+                                input=block.get("input") or {},
+                                id=block.get("id", ""),
+                            )
             elif t == "system":
                 sid = (event.get("session_id") or "").strip()
                 if sid and sid != self._session_id:
@@ -298,10 +412,33 @@ class ClaudeSession:
                 usage = event.get("usage") or {}
                 input_tokens = int(usage.get("input_tokens", 0) or 0)
                 output_tokens = int(usage.get("output_tokens", 0) or 0)
+                # Fallback: result.result carries the full assembled
+                # text reply in some CLI versions. If our
+                # AssistantMessage text-block extraction came up
+                # empty, use it.
+                result_text = event.get("result") or ""
+                if not reply_parts and result_text:
+                    reply_parts.append(result_text)
                 break
 
+        reply = "".join(reply_parts).strip()
+        if not reply:
+            logger.warning(
+                "agent %s: claude turn produced no text reply. events seen: %s",
+                self.agent_id, event_types_seen,
+            )
+        if self.audit is not None:
+            self.audit.write(
+                "turn.end",
+                reply_len=len(reply),
+                tool_calls=tool_calls,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=int((time.time() - turn_started_at) * 1000),
+                event_types=event_types_seen,
+            )
         return TurnResult(
-            reply="".join(reply_parts).strip(),
+            reply=reply,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tool_calls=tool_calls,

@@ -40,21 +40,33 @@ import shutil
 from pathlib import Path
 
 from .base import Adapter, TurnContext, TurnResult
-from .cli_session import ClaudeSession
+from .cli_session import AuditLog, ClaudeSession
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_IMAGE = "puffo/agent-runtime:latest"
+# Bump this when the Dockerfile changes so existing hosts pick up
+# a rebuild without the user having to remember to prune the old
+# image tag. ``_ensure_image`` only builds when the tag is missing
+# locally, so a stable tag would mask Dockerfile edits.
+DEFAULT_IMAGE = "puffo/agent-runtime:v4"
 
 # Kept minimal: node (for the claude CLI npm package), git, the tools
 # claude's built-in commands shell out to. No COPY/ADD so the build
 # context is empty and we can build from stdin.
 #
-# We deliberately run as root inside the container. The container
-# itself is the sandbox; a non-root user here would just complicate
-# the bind-mount of ~/.claude from the host (OAuth creds owned by the
-# host user's UID don't line up with an in-container 'agent' user).
+# The claude CLI refuses ``--dangerously-skip-permissions`` when
+# running as root, so we create a non-root ``agent`` user and ``USER
+# agent`` into it. On Windows/macOS Docker Desktop, bind-mounted host
+# paths are readable by any container uid (the VFS layer maps perms),
+# so the UID of this user doesn't need to match the host user.
+#
+# PID 1 tails the audit log written by the adapter on the host (via
+# the /workspace bind-mount). That turns ``docker logs <container>``
+# into a live feed of turn inputs, assistant replies, and tool calls
+# — otherwise the image would be a black box because the claude
+# subprocess is spawned via docker-exec and its stdout goes to the
+# adapter on the host, never to the container's PID 1.
 DOCKERFILE = """\
 FROM node:22-bookworm-slim
 
@@ -64,9 +76,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 
 RUN npm install -g @anthropic-ai/claude-code
 
+RUN useradd -m -u 2000 -s /bin/bash agent
+USER agent
 WORKDIR /workspace
 
-CMD ["sleep", "infinity"]
+# GNU tail -F relies on inotify, and inotify events don't propagate
+# through Docker Desktop's host bind-mount on Windows / macOS — so
+# `tail -F` on an audit log written from the host sits silent while
+# the file grows. This CMD polls the file size every second and
+# emits any newly-appended bytes to stdout; docker-logs then streams
+# them. Start from current EOF so we don't re-dump the full history
+# on every container restart.
+CMD ["sh", "-c", "set -eu; mkdir -p /workspace/.puffoagent; touch /workspace/.puffoagent/audit.log; echo \\"[$(date -u +%FT%TZ)] puffo agent=${PUFFO_AGENT_ID:-unknown} container starting; polling /workspace/.puffoagent/audit.log every 1s\\"; last=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); while :; do size=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); if [ \\"$size\\" -gt \\"$last\\" ]; then tail -c +$((last + 1)) /workspace/.puffoagent/audit.log; last=$size; elif [ \\"$size\\" -lt \\"$last\\" ]; then last=0; fi; sleep 1; done"]
 """
 
 
@@ -88,6 +109,12 @@ class DockerCLIAdapter(Adapter):
         self.session_file = Path(session_file)
         self.container_name = f"puffo-{agent_id}"
         self.host_claude_creds_dir = str(Path.home() / ".claude")
+        # Claude CLI writes user-level settings to ~/.claude.json (a
+        # sibling file next to the .claude/ directory). We mount it
+        # only when it exists on the host; otherwise docker's auto-
+        # mkdir behaviour would turn the mount target into a dir and
+        # the CLI would keep complaining.
+        self.host_claude_config_file = Path.home() / ".claude.json"
         self._started_lock = asyncio.Lock()
         self._started = False
         self._session: ClaudeSession | None = None
@@ -103,6 +130,13 @@ class DockerCLIAdapter(Adapter):
                 # the docker exec subprocess on the host has no
                 # meaningful cwd for the claude process.
                 cwd=None,
+                # Write from the host filesystem — the workspace bind-
+                # mount means the in-container tail -F PID 1 picks the
+                # same file up and routes it to `docker logs`.
+                audit=AuditLog(
+                    Path(self.workspace_dir) / ".puffoagent" / "audit.log",
+                    self.agent_id,
+                ),
             )
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
         return await self._session.run_turn(user_message, ctx.system_prompt)
@@ -198,12 +232,29 @@ class DockerCLIAdapter(Adapter):
         cmd = [
             "docker", "run", "-d",
             "--name", self.container_name,
+            "-e", f"PUFFO_AGENT_ID={self.agent_id}",
             "-v", f"{self.workspace_dir}:/workspace",
-            "-v", f"{self.host_claude_creds_dir}:/root/.claude",
+            # Matches the Dockerfile's useradd ... -m agent; agent's
+            # $HOME is /home/agent, so the CLI finds its OAuth creds
+            # at /home/agent/.claude from the host's ~/.claude.
+            "-v", f"{self.host_claude_creds_dir}:/home/agent/.claude",
+        ]
+        # Mount the user settings file only if it exists — otherwise
+        # docker silently creates the target as a directory and the
+        # CLI logs a noisy "config file not found" on every spawn.
+        if self.host_claude_config_file.exists():
+            cmd.extend(
+                ["-v", f"{self.host_claude_config_file}:/home/agent/.claude.json"]
+            )
+        cmd.extend([
             "--init",  # reap zombies from claude's child processes
             self.image,
-            "sleep", "infinity",
-        ]
+            # NOTE: do NOT pass a command override here. The image's
+            # CMD is `tail -F` on the audit log so docker logs streams
+            # turn events. Passing `sleep infinity` as positional
+            # argv clobbers the CMD and turns docker logs into a
+            # black box — which it was before this fix.
+        ])
         rc, _, stderr = await _run_cmd(cmd, check=False)
         if rc != 0:
             raise RuntimeError(

@@ -25,6 +25,10 @@ config.yml
 .DS_Store
 .claude/
 
+# Scratch / debugging artifacts dropped during local troubleshooting
+# (paste-in log captures, quick exports, etc.). Never tracked.
+tmp/
+
 # Runtime state the daemon writes under ~/.puffoagent, not in-tree,
 # but keep these patterns defensive in case someone launches from
 # inside the repo dir.

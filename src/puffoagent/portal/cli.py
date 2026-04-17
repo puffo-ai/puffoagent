@@ -371,6 +371,65 @@ def _set_agent_state(agent_id: str, new_state: str) -> int:
     return 0
 
 
+def cmd_agent_runtime(args: argparse.Namespace) -> int:
+    """Update the runtime: block in an agent's agent.yml without needing
+    a text editor. Every field is optional — only the ones you pass get
+    changed. Invoke with no field flags to just print the current
+    runtime block.
+    """
+    agent_id = args.id
+    if not agent_yml_path(agent_id).exists():
+        print(f"error: agent {agent_id!r} not found", file=sys.stderr)
+        return 2
+    cfg = AgentConfig.load(agent_id)
+
+    touched = False
+    if args.kind is not None:
+        cfg.runtime.kind = args.kind
+        touched = True
+    if args.provider is not None:
+        cfg.runtime.provider = args.provider
+        touched = True
+    if args.model is not None:
+        cfg.runtime.model = args.model
+        touched = True
+    if args.api_key is not None:
+        cfg.runtime.api_key = args.api_key
+        touched = True
+    if args.docker_image is not None:
+        cfg.runtime.docker_image = args.docker_image
+        touched = True
+    if args.allowed_tools is not None:
+        raw = args.allowed_tools.strip()
+        cfg.runtime.allowed_tools = (
+            [] if not raw else [t.strip() for t in raw.split(",") if t.strip()]
+        )
+        touched = True
+
+    if not touched:
+        # No flags → just print. Matches `agent show`'s runtime lines.
+        print(f"id:              {cfg.id}")
+        print("runtime:")
+        print(f"  kind:          {cfg.runtime.kind}")
+        print(f"  provider:      {cfg.runtime.provider or '(default)'}")
+        print(f"  model:         {cfg.runtime.model or '(default)'}")
+        print(f"  api_key:       {'(set)' if cfg.runtime.api_key else '(inherit)'}")
+        print(f"  allowed_tools: {cfg.runtime.allowed_tools or '[]'}")
+        print(f"  docker_image:  {cfg.runtime.docker_image or '(bundled default)'}")
+        return 0
+
+    cfg.save()
+    print(f"agent {agent_id!r} runtime updated:")
+    print(f"  kind={cfg.runtime.kind} model={cfg.runtime.model or '(default)'}")
+    if cfg.runtime.allowed_tools:
+        print(f"  allowed_tools={cfg.runtime.allowed_tools}")
+    if cfg.runtime.docker_image:
+        print(f"  docker_image={cfg.runtime.docker_image}")
+    if is_daemon_alive():
+        print("daemon will restart the worker on the next reconcile tick.")
+    return 0
+
+
 def cmd_agent_archive(args: argparse.Namespace) -> int:
     agent_id = args.id
     src = agent_dir(agent_id)
@@ -516,6 +575,26 @@ def build_parser() -> argparse.ArgumentParser:
     resume = agent_sub.add_parser("resume", help="Resume a paused agent")
     resume.add_argument("id")
     resume.set_defaults(func=cmd_agent_resume)
+
+    runtime = agent_sub.add_parser(
+        "runtime",
+        help="Show or edit the runtime: block in an agent's agent.yml",
+    )
+    runtime.add_argument("id")
+    runtime.add_argument(
+        "--kind",
+        choices=["chat-only", "sdk", "cli-local", "cli-docker"],
+        help="Runtime adapter kind",
+    )
+    runtime.add_argument("--provider", help="Chat-only: provider (anthropic|openai)")
+    runtime.add_argument("--model", help="Model override (empty string clears)")
+    runtime.add_argument("--api-key", help="Runtime API key (sdk/chat-only)")
+    runtime.add_argument(
+        "--allowed-tools",
+        help="SDK: comma-separated tool allowlist patterns, e.g. Read,Edit,\"Bash(git *)\" — empty clears",
+    )
+    runtime.add_argument("--docker-image", help="cli-docker: override image tag")
+    runtime.set_defaults(func=cmd_agent_runtime)
 
     archive = agent_sub.add_parser("archive", help="Stop and archive an agent to ~/.puffoagent/archived/")
     archive.add_argument("id")

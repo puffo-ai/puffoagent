@@ -39,7 +39,7 @@ import shutil
 from pathlib import Path
 
 from .base import Adapter, TurnContext, TurnResult
-from .cli_session import ClaudeSession
+from .cli_session import AuditLog, ClaudeSession
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,10 @@ class LocalCLIAdapter(Adapter):
                 session_file=self.session_file,
                 build_command=self._build_command,
                 cwd=self.workspace_dir,
+                audit=AuditLog(
+                    Path(self.workspace_dir) / ".puffoagent" / "audit.log",
+                    self.agent_id,
+                ),
             )
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
         return await self._session.run_turn(user_message, ctx.system_prompt)
