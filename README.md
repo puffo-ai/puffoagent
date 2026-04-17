@@ -51,11 +51,40 @@ puffoagent init
 ```
 
 Answer the prompts:
+- Default AI provider (`anthropic` | `openai`)
 - Anthropic API key (or leave blank if using OpenAI)
 - OpenAI API key (or leave blank if using Anthropic)
-- Default model, etc.
 
 This writes `~/.puffoagent/daemon.yml`. You can re-run `init` anytime to update keys.
+
+#### Which credentials do I actually need?
+
+Depends on the runtime each of your agents will use. Every agent is independent — a single daemon can host agents across different runtimes, so you only need the credentials for the ones you plan to use.
+
+| If you plan to use… | You need | Notes |
+|---|---|---|
+| `chat-only` | An Anthropic **or** OpenAI API key. | Set in `puffoagent init`. You pay the provider directly for tokens. |
+| `sdk` | An **Anthropic API key**. | Same key slot as `chat-only`. OpenAI isn't supported on this runtime — the SDK is Anthropic-only. Also run `pip install --user --upgrade "puffoagent[sdk]"`. |
+| `cli-local` | **Claude Code CLI OAuth** — no API key. | Skip the key prompts in `init` if this is your only runtime. Set up auth by running `claude login` on the host *once* (see step 3a below). Billing is via your Claude Code subscription, not per-token. |
+| `cli-docker` | **Claude Code CLI OAuth** — no API key. | Same as `cli-local`: run `claude login` on the host once. Puffoagent copies credentials into each agent's sandboxed container on first use. |
+
+**Tip:** If you'll use a mix of runtimes, enter your Anthropic API key in `init` *and* run `claude login` — they cover different paths and don't conflict.
+
+#### 3a. (For `cli-local` and `cli-docker` agents) Log in to Claude Code
+
+One-time host-level step. Install the CLI if you haven't already, then run the interactive login:
+
+```bash
+# Install once
+npm install -g @anthropic-ai/claude-code
+
+# Log in — opens a browser, writes ~/.claude/.credentials.json
+claude login
+```
+
+On first use of each `cli-local` or `cli-docker` agent, puffoagent copies a minimal slice of `~/.claude/` (OAuth credentials + settings, no history or caches) into that agent's private virtual home at `~/.puffoagent/agents/<id>/.claude/`. From then on, every agent has its own isolated claude identity — sessions, history, and token refreshes stay per-agent. Re-running `claude login` on the host refreshes the credentials for *new* agents; existing agents keep their already-issued tokens until those expire.
+
+If you skip this step and try to talk to a `cli-local` / `cli-docker` agent, the first turn will fail with an auth error and the daemon log will point you here.
 
 ### 4. Log in to your Puffo.ai server
 
