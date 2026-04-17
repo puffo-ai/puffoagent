@@ -43,6 +43,12 @@ import logging
 import shutil
 from pathlib import Path
 
+from ...mcp.config import (
+    default_python_executable,
+    export_mcp_script,
+    mcp_env,
+    write_cli_mcp_config,
+)
 from .base import Adapter, TurnContext, TurnResult
 from .cli_session import AuditLog, ClaudeSession
 
@@ -84,7 +90,7 @@ logger = logging.getLogger(__name__)
 # a rebuild without the user having to remember to prune the old
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
-DEFAULT_IMAGE = "puffo/agent-runtime:v4"
+DEFAULT_IMAGE = "puffo/agent-runtime:v5"
 
 # Kept minimal: node (for the claude CLI npm package), git, the tools
 # claude's built-in commands shell out to. No COPY/ADD so the build
@@ -107,9 +113,17 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
         git curl ca-certificates jq ripgrep \\
+        python3 python3-pip \\
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
+
+# Puffo MCP tools server dependencies. `--break-system-packages` is
+# required on Debian bookworm — PEP 668 marks /usr as externally
+# managed. Installing system-wide is acceptable here: the container
+# is single-purpose and disposable.
+RUN pip3 install --break-system-packages --no-cache-dir \\
+        "mcp>=1.0" "aiohttp>=3.9"
 
 RUN useradd -m -u 2000 -s /bin/bash agent
 USER agent
@@ -136,6 +150,11 @@ class DockerCLIAdapter(Adapter):
         claude_dir: str,
         session_file: str,
         creds_dir: str,
+        mcp_script_dir: str,
+        mattermost_url: str = "",
+        mattermost_token: str = "",
+        team: str = "",
+        owner_username: str = "",
     ):
         self.agent_id = agent_id
         self.model = model
@@ -149,6 +168,14 @@ class DockerCLIAdapter(Adapter):
         # ``seed_docker_creds``. Writes from bot sessions stay here
         # and don't bleed into the user's host state.
         self.creds_dir = Path(creds_dir)
+        # Host dir holding puffo_tools.py. Bind-mounted read-only into
+        # the container at /opt/puffoagent-mcp/ so the claude CLI can
+        # spawn the MCP server via `python3 /opt/.../puffo_tools.py`.
+        self.mcp_script_dir = Path(mcp_script_dir)
+        self.mattermost_url = mattermost_url
+        self.mattermost_token = mattermost_token
+        self.team = team
+        self.owner_username = owner_username
         self._started_lock = asyncio.Lock()
         self._started = False
         self._session: ClaudeSession | None = None
@@ -156,6 +183,7 @@ class DockerCLIAdapter(Adapter):
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         await self._ensure_started()
         if self._session is None:
+            extra = self._prepare_mcp_args()
             self._session = ClaudeSession(
                 agent_id=self.agent_id,
                 session_file=self.session_file,
@@ -171,6 +199,7 @@ class DockerCLIAdapter(Adapter):
                     Path(self.workspace_dir) / ".puffoagent" / "audit.log",
                     self.agent_id,
                 ),
+                extra_args=extra,
             )
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
         return await self._session.run_turn(user_message, ctx.system_prompt)
@@ -193,6 +222,41 @@ class DockerCLIAdapter(Adapter):
             cmd.extend(["--model", self.model])
         cmd.extend(extra_args)
         return cmd
+
+    def _prepare_mcp_args(self) -> list[str]:
+        """Write the per-agent MCP config into the workspace so the
+        in-container claude picks it up, and return the extra claude
+        flags. The container already sandboxes tool calls, so no
+        --permission-prompt-tool here; the MCP server is just there
+        to expose proactive puffo actions (send_message etc.).
+        """
+        if not (self.mattermost_url and self.mattermost_token):
+            logger.warning(
+                "agent %s: cli-docker MCP tools unavailable — no mattermost "
+                "URL or bot token; send_message / upload_file disabled",
+                self.agent_id,
+            )
+            return []
+        env = mcp_env(
+            agent_id=self.agent_id,
+            url=self.mattermost_url,
+            token=self.mattermost_token,
+            workspace="/workspace",  # inside the container
+            team=self.team,
+            owner_username=self.owner_username,
+        )
+        # Write to workspace/.puffoagent/mcp-config.json on the host;
+        # the container sees the same file at
+        # /workspace/.puffoagent/mcp-config.json via the workspace
+        # bind-mount.
+        config_host = Path(self.workspace_dir) / ".puffoagent" / "mcp-config.json"
+        write_cli_mcp_config(
+            config_host,
+            command="python3",
+            args=["/opt/puffoagent-mcp/puffo_tools.py"],
+            env=env,
+        )
+        return ["--mcp-config", "/workspace/.puffoagent/mcp-config.json"]
 
     async def _ensure_started(self) -> None:
         async with self._started_lock:
@@ -268,6 +332,11 @@ class DockerCLIAdapter(Adapter):
         # a real dir (Docker would otherwise auto-create it owned by
         # root, which trips ``claude login`` later).
         self.creds_dir.mkdir(parents=True, exist_ok=True)
+        # Write the MCP server script to the mcp_script_dir so it gets
+        # bind-mounted into the container. Idempotent — overwrites on
+        # every worker start so puffo_tools.py updates take effect
+        # without an image rebuild.
+        export_mcp_script(self.mcp_script_dir)
 
         # Two bind-mounts for every cli-docker agent:
         #   1. workspace — per-agent, carries the project-level
@@ -284,6 +353,11 @@ class DockerCLIAdapter(Adapter):
             "-e", f"PUFFO_AGENT_ID={self.agent_id}",
             "-v", f"{self.workspace_dir}:/workspace",
             "-v", f"{self.creds_dir}:/home/agent/.claude",
+            # puffo_tools.py lives on the host (exported from the
+            # installed puffoagent package on every worker start),
+            # bind-mounted read-only into the container so the
+            # claude CLI can spawn it as an MCP server.
+            "-v", f"{self.mcp_script_dir}:/opt/puffoagent-mcp:ro",
             "--init",  # reap zombies from claude's child processes
             self.image,
             # NOTE: do NOT pass a command override here. The image's

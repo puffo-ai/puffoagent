@@ -123,6 +123,7 @@ class ClaudeSession:
         cwd: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
         audit: Optional["AuditLog"] = None,
+        extra_args: Optional[list[str]] = None,
     ):
         """
         ``build_command(extra_args)`` is called with a list of extra
@@ -141,6 +142,12 @@ class ClaudeSession:
         self.cwd = cwd
         self.env = env
         self.audit = audit
+        # Extra claude-code CLI args injected every spawn — most
+        # commonly --mcp-config <path> and --permission-prompt-tool.
+        # Re-applied on every respawn (including after --resume
+        # fallback) so the puffo tools stay available for the whole
+        # agent lifetime.
+        self.extra_args = list(extra_args or [])
 
         self._proc: asyncio.subprocess.Process | None = None
         self._system_prompt_seen: str | None = None
@@ -218,6 +225,7 @@ class ClaudeSession:
             "--output-format", "stream-json",
             "--verbose",
         ]
+        args.extend(self.extra_args)
         # The role / system prompt is NOT passed on argv. The worker
         # writes it (plus shared primer and memory snapshot) to
         # <cwd>/.claude/CLAUDE.md, which Claude Code auto-discovers at

@@ -23,6 +23,11 @@ import fnmatch
 import logging
 from typing import Any
 
+from ...mcp.config import (
+    PUFFO_TOOL_FQNS,
+    default_python_executable,
+    stdio_sdk_config,
+)
 from .base import Adapter, TurnContext, TurnResult, format_history_as_prompt
 
 logger = logging.getLogger(__name__)
@@ -35,6 +40,12 @@ class SDKAdapter(Adapter):
         model: str,
         allowed_tools: list[str] | None = None,
         permission_mode: str | None = None,
+        agent_id: str = "",
+        mattermost_url: str = "",
+        mattermost_token: str = "",
+        workspace_dir: str = "",
+        team: str = "",
+        owner_username: str = "",
     ):
         try:
             from claude_agent_sdk import (
@@ -62,9 +73,32 @@ class SDKAdapter(Adapter):
         self.api_key = api_key
         self.model = model
         self.patterns = list(allowed_tools or [])
+        # Puffo MCP tools are baked-in capabilities the agent should
+        # always have access to when configured — auto-allow them
+        # without asking users to thread mcp__puffo__send_message
+        # through their allowed_tools list.
+        self.patterns.extend(PUFFO_TOOL_FQNS)
         self.permission_mode = permission_mode
+        self.agent_id = agent_id
+        self.mattermost_url = mattermost_url
+        self.mattermost_token = mattermost_token
+        self.workspace_dir = workspace_dir
+        self.team = team
+        self.owner_username = owner_username
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
+        mcp_servers = {}
+        if self.mattermost_url and self.mattermost_token and self.agent_id:
+            mcp_servers = stdio_sdk_config(
+                python=default_python_executable(),
+                agent_id=self.agent_id,
+                url=self.mattermost_url,
+                token=self.mattermost_token,
+                workspace=self.workspace_dir or ctx.workspace_dir or ".",
+                team=self.team,
+                owner_username=self.owner_username,
+            )
+
         options = self._Options(
             system_prompt=ctx.system_prompt,
             cwd=ctx.workspace_dir or None,
@@ -77,6 +111,7 @@ class SDKAdapter(Adapter):
             permission_mode=self.permission_mode,
             model=self.model or None,
             env={"ANTHROPIC_API_KEY": self.api_key} if self.api_key else {},
+            mcp_servers=mcp_servers,
             setting_sources=["project"],  # pick up .claude/CLAUDE.md under cwd
             max_turns=10,
         )

@@ -38,6 +38,12 @@ import logging
 import shutil
 from pathlib import Path
 
+from ...mcp.config import (
+    PERMISSION_PROMPT_TOOL,
+    default_python_executable,
+    mcp_env,
+    write_cli_mcp_config,
+)
 from .base import Adapter, TurnContext, TurnResult
 from .cli_session import AuditLog, ClaudeSession
 
@@ -52,18 +58,29 @@ class LocalCLIAdapter(Adapter):
         workspace_dir: str,
         claude_dir: str,
         session_file: str,
+        mcp_config_file: str,
+        mattermost_url: str = "",
+        mattermost_token: str = "",
+        team: str = "",
+        owner_username: str = "",
     ):
         self.agent_id = agent_id
         self.model = model
         self.workspace_dir = workspace_dir
         self.claude_dir = claude_dir
         self.session_file = Path(session_file)
+        self.mcp_config_file = Path(mcp_config_file)
+        self.mattermost_url = mattermost_url
+        self.mattermost_token = mattermost_token
+        self.team = team
+        self.owner_username = owner_username
         self._verified = False
         self._session: ClaudeSession | None = None
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         self._verify()
         if self._session is None:
+            extra = self._prepare_mcp_args()
             self._session = ClaudeSession(
                 agent_id=self.agent_id,
                 session_file=self.session_file,
@@ -73,6 +90,7 @@ class LocalCLIAdapter(Adapter):
                     Path(self.workspace_dir) / ".puffoagent" / "audit.log",
                     self.agent_id,
                 ),
+                extra_args=extra,
             )
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
         return await self._session.run_turn(user_message, ctx.system_prompt)
@@ -83,11 +101,50 @@ class LocalCLIAdapter(Adapter):
             self._session = None
 
     def _build_command(self, extra_args: list[str]) -> list[str]:
-        cmd = ["claude", "--dangerously-skip-permissions"]
+        # NOTE: do NOT pass --dangerously-skip-permissions. cli-local
+        # proxies tool permission decisions to the owner via the MCP
+        # permission-prompt callback instead — see
+        # ``_prepare_mcp_args``. The callback falls back to "deny on
+        # timeout", which is the safer default for a host-level
+        # runtime.
+        cmd = ["claude"]
         if self.model:
             cmd.extend(["--model", self.model])
         cmd.extend(extra_args)
         return cmd
+
+    def _prepare_mcp_args(self) -> list[str]:
+        """Write per-agent MCP config and return the claude-CLI flags
+        that register it + enable the permission-prompt proxy."""
+        # If we don't have a bot token or URL, skip MCP entirely
+        # (we'd be handing claude an un-authable server). The agent
+        # still works; it just lacks send_message / upload_file and
+        # falls back to default claude permission prompts.
+        if not (self.mattermost_url and self.mattermost_token):
+            logger.warning(
+                "agent %s: cli-local MCP tools unavailable — no mattermost "
+                "URL or bot token; send_message / upload_file disabled",
+                self.agent_id,
+            )
+            return []
+        env = mcp_env(
+            agent_id=self.agent_id,
+            url=self.mattermost_url,
+            token=self.mattermost_token,
+            workspace=self.workspace_dir,
+            team=self.team,
+            owner_username=self.owner_username,
+        )
+        write_cli_mcp_config(
+            self.mcp_config_file,
+            command=default_python_executable(),
+            args=["-m", "puffoagent.mcp.puffo_tools"],
+            env=env,
+        )
+        return [
+            "--mcp-config", str(self.mcp_config_file),
+            "--permission-prompt-tool", PERMISSION_PROMPT_TOOL,
+        ]
 
     def _verify(self) -> None:
         if self._verified:

@@ -74,6 +74,28 @@ gives you the exact relative paths; use your `Read` tool to open
 them. Don't try to fetch files yourself — the shell has already
 done that work.
 
+## Proactive actions via the `puffo` MCP tools
+
+Your reply is posted automatically to the channel the message came
+from. If you also need to post to a **different** channel, DM
+another user, or upload a file, use the `puffo` MCP tools:
+
+- `mcp__puffo__send_message(channel, text, root_id="")`
+  - `channel`: `"@username"` for a DM, `"#channel-name"` for a named
+    channel in your team, or a raw 26-char channel id.
+  - Returns a confirmation with the new post id.
+
+- `mcp__puffo__upload_file(path, channel, caption="")`
+  - `path` is relative to your workspace. Don't try to read `/etc/passwd`
+    — the tool refuses anything outside the workspace.
+
+- `mcp__puffo__list_channels()` lists the channels you have access to,
+  showing id, type (D for DM, O for public, P for private), and name.
+
+Use these sparingly and with intent — messages you post proactively
+will surprise people. If a user explicitly asked you to notify
+someone, go ahead; if they didn't, ask first.
+
 ## Your workspace
 
 Your `cwd` is `/workspace` (inside a container) or
@@ -87,28 +109,181 @@ A snapshot of your memory is included in this CLAUDE.md. If you need
 to remember something across sessions, write it as markdown into the
 `memory/` directory under your agent root. Memory updates take
 effect on the next worker restart (pause/resume the agent to force).
+
+## Permission prompts (cli-local only)
+
+If you are running in `cli-local` mode, any tool invocation that
+isn't pre-approved goes through a permission prompt that is posted
+to your human owner's DM. The owner replies `y` / `n` within a few
+minutes; if they don't, the request is denied and you'll see a
+`permission request timed out` error. Plan for this latency — don't
+chain many permission-requiring tool calls if the user seems
+inattentive.
 """
 
 
 DEFAULT_SHARED_README = """\
-# Shared context for all cli-docker / cli-local agents
+# Shared context for all puffoagent agents
 
-Files in this directory are inlined into every agent's generated
-`workspace/.claude/CLAUDE.md` on worker startup. Edit to customise
-the primer your bots see.
+Files in this directory are folded into every agent on worker
+startup:
 
-Primary file: `CLAUDE.md` — the baseline platform primer. Safe to
-edit; your changes apply to all agents on the next worker restart.
+- `CLAUDE.md` — the baseline platform primer, inlined into each
+  agent's generated `workspace/.claude/CLAUDE.md`.
+- `skills/*.md` — copied into each agent's
+  `workspace/.claude/skills/`, where Claude Code and the SDK
+  adapter pick them up as in-context capability descriptions.
 
-If you add other markdown files here, they are not auto-included
-today; extend `ensure_shared_primer` or the `assemble_claude_md`
-helper to pick them up.
+Edit freely; changes apply on the next worker restart (pause/resume
+an agent to force).
 """
 
 
+# ── Default skill markdowns ───────────────────────────────────────────────────
+
+
+DEFAULT_SKILL_SEND_MESSAGE = """\
+# Skill: send_message
+
+Post a message to a Puffo.ai channel or DM a user.
+
+**Tool:** `mcp__puffo__send_message`
+
+**Arguments:**
+- `channel` (required) — one of:
+  - `"@username"` to DM a user
+  - `"#channel-name"` to post in a named channel in your team
+  - a raw 26-char channel id
+- `text` (required) — message body; Markdown is supported
+- `root_id` (optional) — post id to reply inside an existing thread
+
+**When to use:**
+- The user asked you to notify someone who is not in the current
+  conversation ("let the team know…", "ping Alice about…").
+- You are reporting to a specific status / standup channel the user
+  explicitly designated.
+
+**When NOT to use:**
+- Your ordinary reply to the incoming message — that's auto-posted
+  to the originating channel; calling send_message on top of it would
+  cause duplicates.
+- Spontaneous cross-posting that wasn't requested.
+
+**Example:**
+
+```
+send_message(channel="@alice", text="Heads up — your build finished.")
+send_message(channel="#eng-standup", text="Daily: shipped X, in progress Y.")
+```
+"""
+
+
+DEFAULT_SKILL_UPLOAD_FILE = """\
+# Skill: upload_file
+
+Upload a file from your workspace to a Puffo.ai channel.
+
+**Tool:** `mcp__puffo__upload_file`
+
+**Arguments:**
+- `path` (required) — workspace-relative file path, e.g.
+  `reports/weekly.pdf`. Absolute paths that escape the workspace
+  are refused.
+- `channel` (required) — same syntax as `send_message`.
+- `caption` (optional) — text posted alongside the file.
+
+**Workflow:** generate or fetch a file into your workspace (Write
+tool / Bash / attachments), then call `upload_file` to attach it to
+a Puffo.ai post.
+
+**Example:**
+
+```
+# 1. Write the report
+Write(file_path="weekly.md", content="# Week of …")
+# 2. Upload it
+upload_file(path="weekly.md", channel="#eng-standup", caption="weekly report")
+```
+"""
+
+
+DEFAULT_SKILL_ATTACHMENTS = """\
+# Skill: attachments
+
+Files attached to incoming Mattermost messages are auto-downloaded
+to your workspace before each turn. You never need to fetch them
+yourself.
+
+**Where they land:** `attachments/<post_id>/<filename>` relative to
+your workspace root.
+
+**How you're told:** the user-message preamble includes an
+`attachments:` list with the relative paths:
+
+```
+- channel: @alice
+- sender: alice (alice@example.com)
+- attachments:
+  - attachments/p_abc/spec.pdf
+  - attachments/p_abc/screenshot.png
+- message: please review these and tell me what's wrong
+```
+
+**What to do:** use your `Read` tool on the listed paths.
+
+**Note:** attachments persist across turns but a file with the same
+post id can be re-downloaded if the user posts a new version — don't
+assume the path is immutable across conversations.
+"""
+
+
+DEFAULT_SKILL_PERMISSIONS = """\
+# Skill: permission prompts (cli-local only)
+
+If you are running in `cli-local` mode, any tool invocation your
+operator hasn't pre-approved is routed to them via Mattermost DM for
+approval.
+
+**What the operator sees:** a DM that looks like
+
+```
+🔐 agent `<your-id>` wants to run `Bash`
+- command: `git push origin main`
+reply `y` to approve, `n` to deny (times out in 300s)
+```
+
+**What you see:**
+- On approve: the tool runs normally and you get its output.
+- On deny: a tool error with `owner denied the request`.
+- On timeout: a tool error with `permission request timed out`.
+
+**Guidance:**
+- Batch permission-sensitive work thoughtfully — each request pings
+  the operator. Plan the whole change, then ask once.
+- Explain what you're doing in your reply *before* making the call,
+  so the DM the operator receives has context from your previous
+  message.
+- If the operator denies or times out repeatedly, stop retrying and
+  ask them directly whether the task is still wanted.
+
+This skill does not apply to `sdk` or `cli-docker` runtimes: SDK
+agents use an allowlist, and cli-docker agents run in a sandboxed
+container with `--dangerously-skip-permissions` inside.
+"""
+
+
+DEFAULT_SKILLS: dict[str, str] = {
+    "send-message.md": DEFAULT_SKILL_SEND_MESSAGE,
+    "upload-file.md": DEFAULT_SKILL_UPLOAD_FILE,
+    "attachments.md": DEFAULT_SKILL_ATTACHMENTS,
+    "permissions.md": DEFAULT_SKILL_PERMISSIONS,
+}
+
+
 def ensure_shared_primer(shared_dir: Path) -> None:
-    """Create ``shared_dir`` and seed it with a default primer on
-    first use. Idempotent — never overwrites existing files.
+    """Create ``shared_dir`` and seed it with default content on
+    first use. Idempotent — never overwrites existing files so
+    operator edits to the primer / skills survive.
     """
     shared_dir.mkdir(parents=True, exist_ok=True)
     primer = shared_dir / "CLAUDE.md"
@@ -117,6 +292,36 @@ def ensure_shared_primer(shared_dir: Path) -> None:
     readme = shared_dir / "README.md"
     if not readme.exists():
         readme.write_text(DEFAULT_SHARED_README, encoding="utf-8")
+    skills_dir = shared_dir / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    for name, body in DEFAULT_SKILLS.items():
+        path = skills_dir / name
+        if not path.exists():
+            path.write_text(body, encoding="utf-8")
+
+
+def sync_shared_skills(shared_dir: Path, workspace_dir: Path) -> None:
+    """Mirror ``shared/skills/*.md`` into
+    ``<workspace>/.claude/skills/`` so Claude Code (cli-docker,
+    cli-local) auto-discovers them and the SDK adapter's project-
+    scope lookup picks them up. Always overwrites so operator edits
+    to the shared skills propagate on the next worker restart.
+    """
+    src = shared_dir / "skills"
+    if not src.is_dir():
+        return
+    dst = workspace_dir / ".claude" / "skills"
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in src.glob("*.md"):
+        try:
+            (dst / path.name).write_text(
+                path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Non-fatal — skills are a nice-to-have, don't break the
+            # worker startup if the copy fails.
+            continue
 
 
 def read_shared_primer(shared_dir: Path) -> str:

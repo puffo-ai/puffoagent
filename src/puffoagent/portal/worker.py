@@ -26,6 +26,7 @@ from ..agent.shared_content import (
     ensure_shared_primer,
     read_memory_snapshot,
     read_shared_primer,
+    sync_shared_skills,
     write_claude_md,
 )
 from .state import (
@@ -36,6 +37,7 @@ from .state import (
     agent_dir,
     cli_session_json_path,
     docker_creds_dir,
+    docker_dir,
     docker_shared_dir,
 )
 
@@ -69,6 +71,11 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             api_key=api_key,
             model=model,
             allowed_tools=agent_cfg.runtime.allowed_tools,
+            agent_id=agent_cfg.id,
+            mattermost_url=agent_cfg.mattermost.url,
+            mattermost_token=agent_cfg.mattermost.bot_token,
+            workspace_dir=str(agent_cfg.resolve_workspace_dir()),
+            team=agent_cfg.mattermost.team_name,
         )
 
     # The claude CLI adapters authenticate via OAuth credentials the
@@ -86,6 +93,10 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             claude_dir=str(agent_cfg.resolve_claude_dir()),
             session_file=str(cli_session_json_path(agent_cfg.id)),
             creds_dir=str(docker_creds_dir()),
+            mcp_script_dir=str(docker_dir() / "mcp"),
+            mattermost_url=agent_cfg.mattermost.url,
+            mattermost_token=agent_cfg.mattermost.bot_token,
+            team=agent_cfg.mattermost.team_name,
         )
 
     if kind == "cli-local":
@@ -96,6 +107,10 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             workspace_dir=str(agent_cfg.resolve_workspace_dir()),
             claude_dir=str(agent_cfg.resolve_claude_dir()),
             session_file=str(cli_session_json_path(agent_cfg.id)),
+            mcp_config_file=str(agent_dir(agent_cfg.id) / "mcp-config.json"),
+            mattermost_url=agent_cfg.mattermost.url,
+            mattermost_token=agent_cfg.mattermost.bot_token,
+            team=agent_cfg.mattermost.team_name,
         )
 
     raise RuntimeError(
@@ -193,6 +208,7 @@ class Worker:
             # start so pause/resume picks up edits.
             shared_path = docker_shared_dir()
             ensure_shared_primer(shared_path)
+            sync_shared_skills(shared_path, Path(workspace_path))
             primer = read_shared_primer(shared_path)
             try:
                 profile_text = Path(profile_path).read_text(encoding="utf-8")
