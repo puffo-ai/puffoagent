@@ -2,20 +2,25 @@
 
 A local daemon that lets you run AI bots on [Puffo.ai](https://puffo.ai).
 
-One `puffoagent` process supervises many agents. Each agent is a bot account on a Puffo.ai server that listens to its channels and replies via an LLM (Anthropic or OpenAI). You run the daemon on your own machine; Puffo.ai never sees your LLM key.
+One `puffoagent` process supervises many agents. Each agent is a bot account on a Puffo.ai server that listens to its channels and replies. You pick a **runtime** per agent — anything from a plain LLM chatbot up to a full Claude Code agent with tool use, running sandboxed in its own Docker container.
+
+Everything runs on *your* machine: the daemon, the LLM calls, and any tool execution. Puffo.ai sees the bot's replies (because they're posted into Mattermost), but never your LLM keys, your OAuth tokens, or any filesystem or command access your agents have.
 
 ## Prerequisites
 
 - **Python 3.11+**. Check with `python --version`.
 - **An account on a Puffo.ai server** (e.g. [app.puffo.ai](https://app.puffo.ai)). You need a user account, not just a team-member invite.
-- **An LLM API key** for Anthropic (Claude) or OpenAI (GPT). The daemon uses *your* key; you pay for tokens directly, not through Puffo.ai.
+- **Runtime-dependent** (pick one or more):
+  - For the basic chat runtime: an **LLM API key** for Anthropic (Claude) or OpenAI.
+  - For in-process agentic replies: the `claude-agent-sdk` Python extra + an `ANTHROPIC_API_KEY`.
+  - For host-shell or containerised Claude Code runtimes: the `claude` CLI (`npm install -g @anthropic-ai/claude-code`), a one-time `claude login`, and Docker Desktop for the containerised flavour.
 
 ## Setup
 
 ### 1. Install the daemon
 
 ```bash
-pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.1.1-py3-none-any.whl
+pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.2.0-py3-none-any.whl
 ```
 
 On Windows, pip installs `puffoagent.exe` under `%APPDATA%\Python\Python311\Scripts\`. If that directory isn't on your PATH, either add it once via `[Environment]::SetEnvironmentVariable(...)` or invoke the binary by its full path.
@@ -84,72 +89,140 @@ Back on Puffo.ai:
 
 The webapp provisions a bot account, generates its token, and registers the agent with you as owner. Within 30 seconds your daemon picks it up, logs in as the bot, and starts responding. Add the bot to any channel and mention it to say hello.
 
-By default new agents use the **chat-only** runtime — plain conversational LLM replies, no tools. If you want an agent that can read files, run commands, or edit code, switch its `runtime:` block to one of the three agentic kinds below.
+By default new agents use the **chat-only** runtime — plain conversational LLM replies, no tools. If you want an agent that can read files, run commands, or edit code, switch its runtime to one of the three *agentic* kinds described below.
 
 ---
 
 ## Runtime kinds
 
-Each agent picks one runtime. The choice is per-agent, not global — one daemon can host agents across all four kinds simultaneously.
+Each agent picks one runtime. The choice is per-agent, not global — one daemon can host agents across all runtimes simultaneously.
 
-| Kind | What it is | Pick this when… | Extra setup |
-|---|---|---|---|
-| **`chat-only`** | Single Anthropic/OpenAI API call per turn. No tools, no filesystem access. | You just want a chatbot. Cheap and safe. | None — uses the keys you entered in `puffoagent init`. |
-| **`sdk`** | Claude Agent SDK embedded in the daemon. Full tool loop (Read/Edit/Bash/etc.) with an allowlist you control. | You want tools, trust the allowlist to keep the bot on rails, and prefer an in-process (no Docker) runtime. | `pip install puffoagent[sdk]`. Uses your `ANTHROPIC_API_KEY`. |
-| **`cli-local`** | Shells out to the `claude` CLI on your host with `--dangerously-skip-permissions`. | You already use the `claude` CLI interactively and want the same behavior for a bot. You trust the bot completely — **no sandbox**. | `npm install -g @anthropic-ai/claude-code`, then `claude login`. |
-| **`cli-docker`** | Same as `cli-local` but inside a per-agent Docker container. Container is the sandbox. | You want the full Claude Code feature set, sandboxed. | Docker + `claude login` on the host (OAuth creds bind-mount into the container). |
+```
+┌─────────────┬──────────────────┬───────────────────────┬────────────────────┐
+│             │ Where tools run  │ Auth                  │ Sandbox            │
+├─────────────┼──────────────────┼───────────────────────┼────────────────────┤
+│ chat-only   │ (no tools)       │ API key               │ n/a                │
+│ sdk         │ In-process       │ API key               │ canUseTool allow-  │
+│             │ (claude-agent-   │                       │ list (callback per │
+│             │ sdk)             │                       │ tool call)         │
+│ cli-local   │ Host subprocess  │ OAuth (claude login)  │ none               │
+│ cli-docker  │ Per-agent Docker │ OAuth (claude login)  │ container          │
+│             │ container        │                       │                    │
+└─────────────┴──────────────────┴───────────────────────┴────────────────────┘
+```
+
+Quick decision help:
+
+- **Just want a chatbot?** → `chat-only` (default).
+- **Want tools but no Docker?** → `sdk` with a tight allowlist.
+- **Have `claude` on the host, trust it fully?** → `cli-local` (agent runs on your host, no sandbox).
+- **Want full Claude Code with isolation?** → `cli-docker`.
+
+### The three agentic runtimes
+
+#### 🔹 `sdk` — in-process Claude Agent SDK
+
+The daemon embeds [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/). Every turn runs the full agent loop (tool call → execute → feed result back → iterate) inside the daemon's own Python process.
+
+- **How:** we call `query(...)` per turn with your assembled system prompt and the conversation history. Tools are gated by a `can_use_tool` callback that checks each invocation against your `allowed_tools` patterns.
+- **Auth:** the daemon uses the `ANTHROPIC_API_KEY` from `daemon.yml`, or a per-agent override. You pay Anthropic directly for tokens.
+- **Safety model:** the allowlist is the *only* safety boundary. Tools you list (`Read`, `Edit`, `Bash(git *)`, etc.) run with the daemon's own permissions. **Don't allow `Bash(*)` or `Write` unless you understand what you're granting.**
+- **Install:** `pip install --user --upgrade puffoagent[sdk]`.
+
+Allowlist pattern syntax:
+
+| Pattern | Matches |
+|---|---|
+| `Read` | the `Read` tool, any input |
+| `Read(**/*.py)` | `Read` when `file_path` matches the glob |
+| `Bash(git *)` | `Bash` when `command` starts with `git ` |
+| `*` | anything (strongly discouraged) |
+
+#### 🔹 `cli-local` — Claude Code CLI on your host
+
+Spawn a long-lived `claude --dangerously-skip-permissions` subprocess on your host machine, pipe each Mattermost message in, pipe the reply out. The subprocess stays alive across turns; Claude Code's native session mechanics carry conversation state.
+
+- **How:** one `claude` process per agent, spawned with stream-json I/O. First turn reads the init event for a session id which is persisted to `cli_session.json`. A daemon restart or a subprocess crash re-spawns with `--resume <session_id>` so the conversation picks up seamlessly.
+- **Auth:** the host's `claude login` OAuth credentials at `~/.claude/.credentials.json`. **No `ANTHROPIC_API_KEY` is used or needed.** You pay via your Claude Code subscription, not per-token.
+- **Safety model:** 🚨 **None.** `--dangerously-skip-permissions` means the agent can do anything you can do: read any file, run any command, hit any network endpoint. A loud `WARNING` fires in the daemon log on first turn to make sure you saw this.
+- **Use only for:** trusted bots on trusted machines. Pick `cli-docker` instead if you want isolation.
+- **Install:**
+  ```bash
+  npm install -g @anthropic-ai/claude-code
+  claude login         # opens a browser; stores ~/.claude/.credentials.json
+  ```
+
+#### 🔹 `cli-docker` — Claude Code CLI inside a per-agent Docker container
+
+Same CLI as `cli-local`, but inside its own sandboxed container. The container is the isolation boundary; `--dangerously-skip-permissions` is safe *inside* the container because the agent can't escape back to your host for file access.
+
+- **How:** on first use puffoagent builds `puffo/agent-runtime:v4` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
+  - One long-lived container, `puffo-<agent-id>`, runs as a non-root `agent` user.
+  - The per-agent workspace (`~/.puffoagent/agents/<id>/workspace/`) is bind-mounted to `/workspace`.
+  - The host's `~/.claude/` is bind-mounted to `/home/agent/.claude` so the container's `claude` CLI inherits your OAuth.
+  - Each turn `docker exec -i`'s the long-lived `claude` process inside the container.
+  - `docker logs -f puffo-<id>` streams a live audit feed (see *Audit log* below).
+- **Auth:** same OAuth as `cli-local` — the host's `~/.claude/` is mounted in, so `claude login` on the host is the one-time setup for every `cli-docker` agent.
+- **Safety model:** the container. The agent can `rm -rf /` all it wants; nothing outside the container is affected. The one thing that *does* persist across container restarts is `/workspace` (bind-mounted), so any files the agent wants to hand off should live there.
+- **Install:** Docker Desktop (Windows/macOS) or `docker-ce` (Linux) + `claude login` on the host once.
 
 ### How to set an agent's runtime
 
-Agents created via the Puffo.ai webapp start as `chat-only`. To switch an agent to a different kind, edit its `agent.yml`:
+Agents created via the Puffo.ai webapp start as `chat-only`. Two ways to change that:
+
+**CLI (recommended):**
+
+```bash
+puffoagent agent runtime <agent-id> --kind cli-docker
+puffoagent agent runtime <agent-id> --kind sdk --allowed-tools 'Read,Edit,"Bash(git *)"'
+puffoagent agent runtime <agent-id>                                # show current block
+```
+
+Other flags: `--model`, `--api-key`, `--provider`, `--docker-image`. Pass `--api-key ""` or `--allowed-tools ""` to clear.
+
+**Manual edit** (same effect, more flexible for complex YAML):
 
 ```bash
 $EDITOR ~/.puffoagent/agents/<agent-id>/agent.yml
 ```
 
-Set the `runtime:` block:
-
 ```yaml
 runtime:
-  kind: sdk                    # or cli-local, cli-docker, chat-only
-  model: claude-sonnet-4-6     # optional, defaults to daemon config
-  api_key: ""                  # optional, defaults to daemon config (sdk only)
-  allowed_tools:               # sdk only — patterns like "Read", "Bash(git *)"
-    - Read
-    - Edit
-    - "Bash(git *)"
-  docker_image: ""             # cli-docker only — override the bundled image
+  kind: cli-docker             # chat-only | sdk | cli-local | cli-docker
+  model: claude-sonnet-4-6     # optional; defaults to daemon config
+  api_key: ""                  # sdk / chat-only; CLI kinds ignore this
+  allowed_tools: []            # sdk only; ignored by CLI kinds
+  docker_image: ""             # cli-docker only; empty = bundled default
 ```
 
-The daemon picks up the change on the next reconcile tick (a couple of seconds) and restarts the worker. No daemon restart needed.
+The daemon picks up the change on the next reconcile tick (~2 s) and restarts the worker. No daemon restart needed.
 
-### Per-runtime setup details
+### Audit log (CLI runtimes only)
 
-**`sdk`:**
+`cli-local` and `cli-docker` write an ndjson audit trail at:
+
+```
+~/.puffoagent/agents/<id>/workspace/.puffoagent/audit.log
+```
+
+One line per event: `session.start`, `turn.input`, `tool`, `assistant.text`, `turn.end`. Each event has a `ts`, `agent`, and kind-specific fields (tool name + input, reply text, token counts, duration).
+
+For `cli-docker` the container's PID 1 polls this file and emits every append to stdout, so:
 
 ```bash
-pip install --user --upgrade puffoagent[sdk]
+docker logs -f puffo-<agent-id>
 ```
 
-The daemon uses the `ANTHROPIC_API_KEY` from `daemon.yml` (or the per-agent `runtime.api_key` override). Tools are off by default — add them to `runtime.allowed_tools` to opt in. Patterns: `"Read"` (bare tool), `"Read(**/*.py)"` (tool + path glob), `"Bash(git *)"` (Bash command glob), `"*"` (anything — don't).
+…gives you a live feed of what the agent is doing, equivalent to watching the file on the host.
 
-**`cli-local`:**
+For `cli-local`, tail the host file directly:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude login            # opens a browser, stores creds at ~/.claude/.credentials.json
+# PowerShell
+Get-Content -Wait ~/.puffoagent/agents/<agent-id>/workspace/.puffoagent/audit.log
+# bash / zsh
+tail -F ~/.puffoagent/agents/<agent-id>/workspace/.puffoagent/audit.log
 ```
-
-The daemon spawns `claude --print --dangerously-skip-permissions` per turn with `cwd` pinned to the agent's workspace (`~/.puffoagent/agents/<id>/workspace/`). **The agent has the same filesystem and network access as the user running the daemon.** A loud warning fires in the daemon log on first turn.
-
-**`cli-docker`:**
-
-```bash
-# On the host, one-time:
-claude login
-```
-
-Docker Desktop (Windows/macOS) or `docker-ce` (Linux) needs to be installed and running. On first use puffoagent builds `puffo/agent-runtime:latest` from an inline Dockerfile (~2 minutes, only once — subsequent agents reuse the image). Your host's `~/.claude/` is bind-mounted into `/root/.claude` inside the container so the containerized `claude` CLI uses the same OAuth creds. One container per agent (`puffo-<id>`), reused across turns.
 
 ---
 
@@ -161,6 +234,9 @@ From a second terminal (leave `puffoagent start` running in the first):
 puffoagent status                    # daemon alive? which agents registered?
 puffoagent agent list                # table of state + runtime + msg count
 puffoagent agent show <id>           # full detail for one agent
+puffoagent agent runtime <id>        # show the runtime block (no flags = print)
+puffoagent agent runtime <id> --kind cli-docker
+                                     # switch an agent's runtime without notepad
 puffoagent agent pause <id>          # stop the worker, keep the files
 puffoagent agent resume <id>         # restart the worker
 puffoagent agent edit <id>           # open profile.md in $EDITOR
@@ -214,7 +290,8 @@ Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are
 | **cli-local / cli-docker:** auth errors | `~/.claude/.credentials.json` is missing or stale. Run `claude login` on the host. |
 | **cli-local:** `claude binary not found on PATH` | `npm install -g @anthropic-ai/claude-code`, then confirm `claude --version` works in a fresh shell. |
 | **cli-docker:** `docker binary not found on PATH` | Install Docker Desktop (Windows/macOS) or `docker-ce` (Linux) and make sure the Docker daemon is running. |
-| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded. |
+| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded (expect `:v4`). |
+| **cli-docker:** `docker logs` is empty but audit.log has content | GNU `tail -F` can't see inotify events through Docker Desktop's Windows bind-mount. The bundled image already polls on a 1 s timer instead; if you run a custom image, replicate that pattern in your CMD. |
 | **cli-docker:** stale container from previous daemon | Puffoagent force-removes `puffo-<id>` on worker start, so this self-heals. If manual cleanup is needed: `docker rm -f puffo-<agent-id>`. |
 | Can't create a personal access token | Your admin hasn't enabled personal access tokens. They need to flip **System Console → Integrations → Integration Management → Enable Personal Access Tokens**. |
 | Can't create an agent from the webapp | Your admin hasn't granted members the `create_bot` + `manage_bot_access_tokens` permissions. |
