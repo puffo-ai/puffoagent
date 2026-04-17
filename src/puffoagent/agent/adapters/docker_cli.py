@@ -6,15 +6,21 @@ container is the sandbox — Claude Code runs with
 container back to the host is non-trivial and the user opted into
 this model by picking ``kind=cli-docker``.
 
-**Auth.** The claude CLI inside the container reads OAuth credentials
-from ``/home/agent/.claude``, which is bind-mounted from
-``~/.puffoagent/docker/creds`` on the host. On first cli-docker use
-we seed that dir by copying ``.credentials.json`` (and
-``.claude.json`` if present) from the user's personal ``~/.claude``
-— so a one-time ``claude login`` on the host covers every cli-docker
-agent. Keeping a puffoagent-owned copy separates bot activity
-(session caches, history, refreshed tokens) from the user's personal
-Claude Code state. No ``ANTHROPIC_API_KEY`` is injected.
+**Auth.** Each agent gets its own isolated claude identity. The
+container's ``/home/agent`` is bind-mounted from
+``~/.puffoagent/agents/<id>/`` on the host, so the CLI's
+``~/.claude/`` inside the container resolves to
+``~/.puffoagent/agents/<id>/.claude/`` on the host — a per-agent
+dir, seeded once from the operator's real ``~/.claude`` (credentials
++ settings only). Bot sessions, history, and token refreshes stay
+inside that dir — no bleed between agents, no bleed back to the
+operator's personal claude state. No ``ANTHROPIC_API_KEY`` is
+injected.
+
+**Cross-agent coordination.** A second bind-mount exposes
+``~/.puffoagent/shared/`` at ``/workspace/.shared`` inside the
+container so all agents on this host can drop files, read each
+other's artifacts, and cooperate at the filesystem level.
 
 **Lifecycle layering.**
     container   — one per agent, ``puffo-<id>``, started lazily,
@@ -44,44 +50,14 @@ import shutil
 from pathlib import Path
 
 from ...mcp.config import (
-    default_python_executable,
     export_mcp_script,
     mcp_env,
     write_cli_mcp_config,
 )
+from ...portal.state import seed_claude_home
 from .base import Adapter, TurnContext, TurnResult
 from .cli_session import AuditLog, ClaudeSession
 
-
-# Filenames to lift from the host's ~/.claude on first seed. Limited
-# to the OAuth-relevant set to avoid copying multi-MB caches /
-# history the user doesn't want shared with their bots.
-SEED_FILES = (".credentials.json", ".claude.json", "settings.json")
-
-
-def seed_docker_creds(host_claude_dir: Path, puffo_creds_dir: Path) -> bool:
-    """Copy OAuth-essential files from the host's personal Claude Code
-    state into puffoagent's own creds dir, so cli-docker containers
-    can authenticate without bind-mounting the user's full ~/.claude.
-
-    Idempotent: existing files in ``puffo_creds_dir`` are left alone
-    (so refreshed tokens from previous bot runs survive). Returns
-    True if we actually copied anything — used only for diagnostic
-    logging.
-    """
-    puffo_creds_dir.mkdir(parents=True, exist_ok=True)
-    copied_any = False
-    for name in SEED_FILES:
-        src = host_claude_dir / name
-        dst = puffo_creds_dir / name
-        if dst.exists() or not src.exists():
-            continue
-        try:
-            shutil.copy2(src, dst)
-            copied_any = True
-        except OSError as exc:
-            logger.warning("seed %s -> %s failed: %s", src, dst, exc)
-    return copied_any
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +125,8 @@ class DockerCLIAdapter(Adapter):
         workspace_dir: str,
         claude_dir: str,
         session_file: str,
-        creds_dir: str,
+        agent_home_dir: str,
+        shared_fs_dir: str,
         mcp_script_dir: str,
         mattermost_url: str = "",
         mattermost_token: str = "",
@@ -163,11 +140,19 @@ class DockerCLIAdapter(Adapter):
         self.claude_dir = claude_dir
         self.session_file = Path(session_file)
         self.container_name = f"puffo-{agent_id}"
-        # puffoagent-owned OAuth state, bind-mounted into the container.
-        # Seeded from the host's personal ~/.claude on first use — see
-        # ``seed_docker_creds``. Writes from bot sessions stay here
-        # and don't bleed into the user's host state.
-        self.creds_dir = Path(creds_dir)
+        # This agent's private ``.claude`` dir on the host. The
+        # agent_home_dir arg is the agent's virtual $HOME; the
+        # ``.claude`` inside it is what we bind-mount into
+        # /home/agent/.claude in the container (not the whole home,
+        # so the container's default home skeleton — .bashrc etc —
+        # stays intact).
+        self.agent_home_dir = Path(agent_home_dir)
+        self.claude_home_src = self.agent_home_dir / ".claude"
+        # Cross-agent cooperation dir, bind-mounted at
+        # /workspace/.shared inside the container. All agents on this
+        # host see the same mount — an intentional escape hatch from
+        # per-agent isolation for file-level coordination.
+        self.shared_fs_dir = Path(shared_fs_dir)
         # Host dir holding puffo_tools.py. Bind-mounted read-only into
         # the container at /opt/puffoagent-mcp/ so the claude CLI can
         # spawn the MCP server via `python3 /opt/.../puffo_tools.py`.
@@ -182,27 +167,27 @@ class DockerCLIAdapter(Adapter):
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         await self._ensure_started()
-        if self._session is None:
-            extra = self._prepare_mcp_args()
-            self._session = ClaudeSession(
-                agent_id=self.agent_id,
-                session_file=self.session_file,
-                build_command=self._build_command,
-                # cwd is set via WORKDIR /workspace inside the container;
-                # the docker exec subprocess on the host has no
-                # meaningful cwd for the claude process.
-                cwd=None,
-                # Write from the host filesystem — the workspace bind-
-                # mount means the in-container tail -F PID 1 picks the
-                # same file up and routes it to `docker logs`.
-                audit=AuditLog(
-                    Path(self.workspace_dir) / ".puffoagent" / "audit.log",
-                    self.agent_id,
-                ),
-                extra_args=extra,
-            )
+        session = self._ensure_session()
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
-        return await self._session.run_turn(user_message, ctx.system_prompt)
+        return await session.run_turn(user_message, ctx.system_prompt)
+
+    async def warm(self, system_prompt: str) -> None:
+        """Start the container + claude subprocess eagerly at daemon
+        start. Only spawns the subprocess if this agent has a
+        persisted session — fresh agents wait for their first
+        message to avoid paying for idle bots. The container itself
+        IS started regardless, because ``docker logs`` tailing the
+        audit file is useful even for idle agents.
+        """
+        await self._ensure_started()
+        session = self._ensure_session()
+        if not session.has_persisted_session():
+            logger.info(
+                "agent %s: no persisted session; deferring claude spawn until first message",
+                self.agent_id,
+            )
+            return
+        await session.warm(system_prompt)
 
     async def aclose(self) -> None:
         if self._session is not None:
@@ -212,6 +197,29 @@ class DockerCLIAdapter(Adapter):
             return
         await _run_cmd(["docker", "rm", "-f", self.container_name], check=False)
         self._started = False
+
+    def _ensure_session(self) -> ClaudeSession:
+        if self._session is not None:
+            return self._session
+        extra = self._prepare_mcp_args()
+        self._session = ClaudeSession(
+            agent_id=self.agent_id,
+            session_file=self.session_file,
+            build_command=self._build_command,
+            # cwd is set via WORKDIR /workspace inside the container;
+            # the docker exec subprocess on the host has no
+            # meaningful cwd for the claude process.
+            cwd=None,
+            # Write from the host filesystem — the workspace bind-
+            # mount means the in-container tail -F PID 1 picks the
+            # same file up and routes it to `docker logs`.
+            audit=AuditLog(
+                Path(self.workspace_dir) / ".puffoagent" / "audit.log",
+                self.agent_id,
+            ),
+            extra_args=extra,
+        )
+        return self._session
 
     def _build_command(self, extra_args: list[str]) -> list[str]:
         cmd = [
@@ -268,24 +276,25 @@ class DockerCLIAdapter(Adapter):
                     "(Windows/macOS) or docker-ce (Linux) to use runtime "
                     "kind 'cli-docker'."
                 )
-            # Seed puffoagent-owned creds from the user's host
-            # ~/.claude on first cli-docker use. If they haven't
-            # ``claude login``'d and we find no creds in either place,
-            # warn up-front so the auth failure at first turn has
-            # context.
-            host_claude = Path.home() / ".claude"
-            seeded = seed_docker_creds(host_claude, self.creds_dir)
+            # Seed this agent's per-agent virtual $HOME from the
+            # operator's real $HOME on first use. Covers
+            # .claude/.credentials.json, .claude/settings.json, and
+            # sibling .claude.json. Each agent gets its own copy so
+            # sessions/history/cache writes stay isolated per agent.
+            host_home = Path.home()
+            seeded = seed_claude_home(host_home, self.agent_home_dir)
             if seeded:
                 logger.info(
-                    "agent %s: seeded %s from host's ~/.claude (first cli-docker use)",
-                    self.agent_id, self.creds_dir,
+                    "agent %s: seeded per-agent virtual $HOME at %s from %s",
+                    self.agent_id, self.agent_home_dir, host_home,
                 )
-            if not (self.creds_dir / ".credentials.json").exists():
+            agent_claude = self.agent_home_dir / ".claude"
+            if not (agent_claude / ".credentials.json").exists():
                 logger.warning(
                     "agent %s: no .credentials.json in %s (and none at %s). "
-                    "run `claude login` on the host, then restart the "
-                    "agent — first turn will otherwise fail with an auth error.",
-                    self.agent_id, self.creds_dir, host_claude,
+                    "run `claude login` on the host, then restart the agent "
+                    "— first turn will otherwise fail with an auth error.",
+                    self.agent_id, agent_claude, host_home / ".claude",
                 )
             await self._ensure_image()
             # Nuke any lingering container from a prior daemon run so
@@ -328,10 +337,18 @@ class DockerCLIAdapter(Adapter):
 
     async def _start_container(self) -> None:
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
-        # Ensure creds dir exists so the bind-mount target resolves to
-        # a real dir (Docker would otherwise auto-create it owned by
-        # root, which trips ``claude login`` later).
-        self.creds_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure every bind-mount source exists as a real dir so
+        # Docker doesn't auto-create them (which would be owned by
+        # root and break the container's ``agent`` user writes).
+        self.agent_home_dir.mkdir(parents=True, exist_ok=True)
+        (self.agent_home_dir / ".claude").mkdir(parents=True, exist_ok=True)
+        # ``.claude.json`` is a FILE sibling to the .claude/ dir.
+        # Touch it so the bind-mount below resolves to a real file
+        # (without this, Docker creates a directory at the mount
+        # target and claude CLI then errors parsing it as JSON).
+        agent_claude_json = self.agent_home_dir / ".claude.json"
+        agent_claude_json.touch(exist_ok=True)
+        self.shared_fs_dir.mkdir(parents=True, exist_ok=True)
         # Write the MCP server script to the mcp_script_dir so it gets
         # bind-mounted into the container. Idempotent — overwrites on
         # every worker start so puffo_tools.py updates take effect
@@ -351,8 +368,24 @@ class DockerCLIAdapter(Adapter):
             "docker", "run", "-d",
             "--name", self.container_name,
             "-e", f"PUFFO_AGENT_ID={self.agent_id}",
+            # Per-agent project root — agent's workspace lives here,
+            # attachments are downloaded here, CLAUDE.md is here.
             "-v", f"{self.workspace_dir}:/workspace",
-            "-v", f"{self.creds_dir}:/home/agent/.claude",
+            # Per-agent claude identity. The agent's private
+            # ``.claude`` dir on the host becomes the container's
+            # ``/home/agent/.claude`` — isolated credentials,
+            # sessions, history, and cache per agent.
+            "-v", f"{self.claude_home_src}:/home/agent/.claude",
+            # Claude CLI also reads a sibling ``~/.claude.json`` for
+            # user-level config; without this mount, the file lives
+            # on the container's ephemeral filesystem and is lost on
+            # restart, producing a "config file not found" warning
+            # every spawn.
+            "-v", f"{agent_claude_json}:/home/agent/.claude.json",
+            # Cross-agent cooperation dir — every agent sees the
+            # same mount at /workspace/.shared. Use for file-level
+            # coordination between bots.
+            "-v", f"{self.shared_fs_dir}:/workspace/.shared",
             # puffo_tools.py lives on the host (exported from the
             # installed puffoagent package on every worker start),
             # bind-mounted read-only into the container so the

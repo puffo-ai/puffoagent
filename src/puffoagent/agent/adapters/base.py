@@ -58,6 +58,16 @@ class Adapter(ABC):
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         """Execute one turn against the underlying runtime."""
 
+    async def warm(self, system_prompt: str) -> None:
+        """Pre-spawn any long-lived runtime state so the first turn
+        doesn't pay startup latency. The worker calls this right after
+        construction if the agent already has a persisted session (so
+        it can ``--resume`` immediately on daemon start).
+
+        Default is a no-op for stateless adapters (chat-only, sdk).
+        """
+        return None
+
     async def aclose(self) -> None:
         """Release any runtime resources (containers, subprocesses, MCP
         servers). Default is a no-op for stateless adapters.
@@ -68,11 +78,12 @@ class Adapter(ABC):
 def format_history_as_prompt(messages: list[dict]) -> str:
     """Render shell conversation history as a single prompt string.
 
-    All three non-chat adapters (sdk, cli-docker, cli-local) are
-    one-shot per turn — they don't maintain a runtime session across
-    turns. Prior turns are embedded as a ``<prior_turns>`` block so the
-    agent still has context without us plumbing session resume into
-    every adapter.
+    The SDK adapter is one-shot per turn; the two CLI adapters keep a
+    long-lived subprocess that owns its own session, so they pass
+    only the latest user message (see local_cli / docker_cli). This
+    helper is therefore only used by the SDK adapter today, but kept
+    in the base module for any future adapter that wants to embed
+    history in a single prompt string.
     """
     if not messages:
         return ""

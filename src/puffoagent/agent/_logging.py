@@ -1,7 +1,7 @@
 """Shared per-agent logging helper.
 
-Every subsystem the worker owns (MattermostClient, UsageTracker,
-PuffoAgent, adapters) lives inside exactly one agent. When the daemon
+Every subsystem the worker owns (MattermostClient, PuffoAgent,
+adapters) lives inside exactly one agent. When the daemon
 hosts many agents their log output interleaves and becomes hard to
 follow. ``agent_logger`` returns a ``LoggerAdapter`` that prefixes
 each record with ``agent <id>:`` so every line is unambiguously

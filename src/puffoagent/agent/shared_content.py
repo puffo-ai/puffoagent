@@ -40,6 +40,10 @@ Every user message is wrapped in a metadata block:
 ```
 - channel: <channel name>
 - sender: <username> (<email>)
+- sender_type: human | bot
+- mentions:                    # only present when the message
+  - alice (human)              #   @-mentions other users/agents
+  - helper-bot (bot)
 - attachments:                 # only present when files are attached
   - attachments/<post_id>/<filename>
   - ...
@@ -49,6 +53,14 @@ Every user message is wrapped in a metadata block:
 Reply only to the `message:` field's content. Never echo the metadata
 block, field labels (`message:`), or bracketed prefixes (`[#channel]`)
 in your response. Address users with `@username` inline when needed.
+
+Use `sender_type` and `mentions` to decide whether to reply:
+- If `sender_type: bot`, you may be in a bot-to-bot loop — be
+  conservative and stay `[SILENT]` unless a human is clearly in the
+  loop.
+- If `mentions:` lists you explicitly by username, reply.
+- If the message @-mentions a *different* human/agent, consider
+  whether you're the right responder.
 
 ## Channels, DMs, teams
 
@@ -77,24 +89,30 @@ done that work.
 ## Proactive actions via the `puffo` MCP tools
 
 Your reply is posted automatically to the channel the message came
-from. If you also need to post to a **different** channel, DM
-another user, or upload a file, use the `puffo` MCP tools:
+from. For anything else — posting elsewhere, uploading files,
+reading context you don't have — use the `puffo` MCP tools. See
+`.claude/skills/` for one doc per tool describing when to use each.
 
-- `mcp__puffo__send_message(channel, text, root_id="")`
-  - `channel`: `"@username"` for a DM, `"#channel-name"` for a named
-    channel in your team, or a raw 26-char channel id.
-  - Returns a confirmation with the new post id.
+**Write / post tools:**
+- `mcp__puffo__send_message(channel, text, root_id="")` — post to
+  another channel or DM a user.
+- `mcp__puffo__upload_file(path, channel, caption="")` — upload a
+  workspace file to a channel.
 
-- `mcp__puffo__upload_file(path, channel, caption="")`
-  - `path` is relative to your workspace. Don't try to read `/etc/passwd`
-    — the tool refuses anything outside the workspace.
+**Read / discovery tools:**
+- `mcp__puffo__list_channels()` — channels you're a member of.
+- `mcp__puffo__list_channel_members(channel)` — who's in a channel.
+- `mcp__puffo__get_channel_history(channel, limit=20)` — recent
+  posts; catch up on a conversation before replying.
+- `mcp__puffo__get_post(post_ref)` — one post by id or permalink.
+- `mcp__puffo__get_user_info(username)` — human vs bot, email, etc.
+- `mcp__puffo__fetch_channel_files(channel, limit=20)` — back-fill
+  attachments from recent channel history into your workspace.
 
-- `mcp__puffo__list_channels()` lists the channels you have access to,
-  showing id, type (D for DM, O for public, P for private), and name.
-
-Use these sparingly and with intent — messages you post proactively
-will surprise people. If a user explicitly asked you to notify
-someone, go ahead; if they didn't, ask first.
+Use the write tools sparingly and with intent — messages you post
+proactively will surprise people. If a user explicitly asked you to
+notify someone, go ahead; if they didn't, ask first. The read tools
+are cheap — reach for them when you need context.
 
 ## Your workspace
 
@@ -102,6 +120,26 @@ Your `cwd` is `/workspace` (inside a container) or
 `~/.puffoagent/agents/<your-id>/workspace/` (on the host). This
 directory survives daemon restarts and, for cli-docker, container
 restarts. Anything outside it may be ephemeral.
+
+Everything under your workspace — including your `.claude/`,
+`memory/`, session transcripts, and cache — is **private to you**.
+Other agents on the same host can't see it.
+
+## Shared filesystem for cooperation
+
+There is one exception to per-agent isolation: the **shared dir**,
+where agents on the same host can leave files for each other,
+coordinate on a common codebase, or hand off artifacts.
+
+- **Inside a cli-docker container:** mounted at `/workspace/.shared`.
+- **On the host (cli-local, sdk):** available at
+  `~/.puffoagent/shared/`. The assembled role section below will
+  restate the exact absolute path your daemon uses.
+
+Treat this like a shared drive: leave a note, drop a file, look for
+others' contributions. Don't assume exclusive access — another agent
+might be touching the same file. Use filenames that identify you
+(e.g. `notes-from-<your-id>.md`) to reduce collisions.
 
 ## Memory
 
@@ -272,11 +310,146 @@ container with `--dangerously-skip-permissions` inside.
 """
 
 
+DEFAULT_SKILL_CHANNEL_HISTORY = """\
+# Skill: get_channel_history
+
+Fetch the last N posts in a channel so you can catch up on the
+conversation before responding.
+
+**Tool:** `mcp__puffo__get_channel_history`
+
+**Arguments:**
+- `channel` (required) — `"@username"`, `"#channel-name"`, or raw
+  channel id.
+- `limit` (optional, default 20, max 200) — how many recent posts.
+
+**Output format:** one line per post in chronological order:
+`<iso-ts>  @<sender> (human|bot): <text>  [files: a.pdf, b.txt]`
+
+**When to use:**
+- The current message references something earlier you don't have
+  context for.
+- You just joined a channel and need to understand the thread.
+- Someone asks "what did we decide last week about X?"
+
+**When NOT to use:**
+- For DMs — your own conversation log with that user already covers
+  it, and fetching history costs an API round-trip per message.
+- For every turn — keep the window small. You don't need the last
+  200 posts to reply to "hi".
+"""
+
+
+DEFAULT_SKILL_CHANNEL_MEMBERS = """\
+# Skill: list_channel_members
+
+See who is in a channel — handy before you `@mention` someone to
+confirm they're actually present, or to discover other agents you
+could coordinate with via the shared filesystem.
+
+**Tool:** `mcp__puffo__list_channel_members`
+
+**Arguments:**
+- `channel` (required) — same ref syntax as the other channel tools.
+
+**Output format:** one line per member, `- <username> (human|bot)`.
+
+**When to use:**
+- A human asks "who's on the #eng-oncall channel?"
+- You want to pick which agent to delegate a subtask to.
+- Before cross-posting, to avoid spamming a channel the target
+  isn't in.
+"""
+
+
+DEFAULT_SKILL_FETCH_CHANNEL_FILES = """\
+# Skill: fetch_channel_files
+
+Back-fill file attachments from the last N posts in a channel into
+your workspace, so your `Read` tool can open them.
+
+**Tool:** `mcp__puffo__fetch_channel_files`
+
+**Arguments:**
+- `channel` (required) — channel ref.
+- `limit` (optional, default 20, max 200) — how many recent posts to
+  scan for attachments.
+
+**Output:** one line per downloaded file:
+`attachments/<post_id>/<filename>` (or `… (cached)` if already
+present).
+
+**When to use:**
+- You joined a channel and need to review files people shared before
+  you got there.
+- A user says "look at the spec I uploaded yesterday".
+- Daemon just restarted and the auto-downloaded attachments from
+  prior turns are in the workspace but you want to confirm.
+
+**When NOT to use:**
+- For the current message's attachments — those are already
+  auto-downloaded. See the `attachments` skill.
+"""
+
+
+DEFAULT_SKILL_GET_POST = """\
+# Skill: get_post
+
+Fetch a single post by its id or permalink URL. Returns sender,
+timestamp, message text, and any attachment filenames.
+
+**Tool:** `mcp__puffo__get_post`
+
+**Arguments:**
+- `post_ref` (required) — either a raw 26-character post id
+  (lowercase alphanumeric) or a permalink URL like
+  `https://<server>/<team>/pl/<post-id>`.
+
+**When to use:**
+- A human shares a Mattermost permalink and asks you to comment on
+  it.
+- You see a reply-thread root_id in a metadata block and want the
+  root post's content.
+- You're in a thread and need to see the original message that
+  started it.
+"""
+
+
+DEFAULT_SKILL_GET_USER_INFO = """\
+# Skill: get_user_info
+
+Look up a user on the Puffo.ai server by @-handle.
+
+**Tool:** `mcp__puffo__get_user_info`
+
+**Arguments:**
+- `username` (required) — with or without leading `@`.
+
+**Output:** username, display name, email, and bot/human type.
+
+**When to use:**
+- You want to DM someone but want to confirm they're human (or
+  avoid DMing a bot).
+- A human refers to "tell alice" and you want to confirm there's
+  exactly one `alice` on the server.
+- Before `@mention`-ing, to verify the spelling.
+
+**Note:** mentions already in the current message are pre-resolved
+for you in the `mentions:` block of the user message preamble —
+don't re-look-up the same names in a loop.
+"""
+
+
 DEFAULT_SKILLS: dict[str, str] = {
     "send-message.md": DEFAULT_SKILL_SEND_MESSAGE,
     "upload-file.md": DEFAULT_SKILL_UPLOAD_FILE,
     "attachments.md": DEFAULT_SKILL_ATTACHMENTS,
     "permissions.md": DEFAULT_SKILL_PERMISSIONS,
+    "channel-history.md": DEFAULT_SKILL_CHANNEL_HISTORY,
+    "channel-members.md": DEFAULT_SKILL_CHANNEL_MEMBERS,
+    "fetch-channel-files.md": DEFAULT_SKILL_FETCH_CHANNEL_FILES,
+    "get-post.md": DEFAULT_SKILL_GET_POST,
+    "get-user-info.md": DEFAULT_SKILL_GET_USER_INFO,
 }
 
 

@@ -3,7 +3,6 @@ import os
 from ._logging import agent_logger
 from .adapters import Adapter, TurnContext
 from .memory import MemoryManager
-from .usage_tracker import UsageTracker
 
 MAX_LOG_ENTRIES = 60
 
@@ -40,34 +39,9 @@ class PuffoAgent:
 
         self.memory = MemoryManager(memory_dir)
         self.memory_dir = memory_dir
-        self.usage = UsageTracker(memory_dir, agent_id=agent_id)
 
         # Universal conversation log shared across all channels.
         self.log: list[dict] = []
-
-    # ── Special commands ──────────────────────────────────────────────────────
-
-    def _cmd_usage(self) -> str:
-        stats = self.usage.stats()
-        at = stats["all_time"]
-        lines = [
-            "## Token Usage\n",
-            f"**All-time:** {at['total']:,} tokens "
-            f"({at['input']:,} input · {at['output']:,} output) "
-            f"over {at['calls']:,} calls\n",
-        ]
-        for granularity in ("daily", "weekly", "monthly", "hourly"):
-            periods = stats[granularity][-10:]
-            if not periods:
-                continue
-            label = granularity.title()
-            lines.append(f"### {label} (last {len(periods)})")
-            lines.append("| Period | Input | Output | Total |")
-            lines.append("|--------|------:|-------:|------:|")
-            for p in periods:
-                lines.append(f"| {p['period']} | {p['input']:,} | {p['output']:,} | {p['total']:,} |")
-            lines.append("")
-        return "\n".join(lines)
 
     # ── Message handling ──────────────────────────────────────────────────────
 
@@ -80,12 +54,16 @@ class PuffoAgent:
         text: str,
         direct: bool = False,
         attachments: list[str] | None = None,
+        sender_is_bot: bool = False,
+        mentions: list[dict] | None = None,
         on_progress=None,
     ) -> str | None:
-        if text.strip().lower() == "!usage":
-            return self._cmd_usage()
-
-        self._append_user(channel_name, sender, sender_email, text, attachments)
+        self._append_user(
+            channel_name, sender, sender_email, text,
+            attachments=attachments,
+            sender_is_bot=sender_is_bot,
+            mentions=mentions,
+        )
 
         ctx = TurnContext(
             system_prompt=self.system_prompt,
@@ -96,7 +74,6 @@ class PuffoAgent:
             on_progress=on_progress,
         )
         result = await self.adapter.run_turn(ctx)
-        self.usage.record(result.input_tokens, result.output_tokens)
 
         if not result.reply or result.reply.strip() == "[SILENT]":
             self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
@@ -112,6 +89,8 @@ class PuffoAgent:
         sender_email: str,
         text: str,
         attachments: list[str] | None,
+        sender_is_bot: bool = False,
+        mentions: list[dict] | None = None,
     ):
         # Structured markdown block makes it obvious to the LLM what is
         # context metadata and what is the actual message content, which
@@ -121,7 +100,13 @@ class PuffoAgent:
         lines = [
             "- channel: " + channel_name,
             f"- sender: {sender}" + (f" ({sender_email})" if sender_email else ""),
+            f"- sender_type: {'bot' if sender_is_bot else 'human'}",
         ]
+        if mentions:
+            lines.append("- mentions:")
+            for m in mentions:
+                kind = "bot" if m.get("is_bot") else "human"
+                lines.append(f"  - {m['username']} ({kind})")
         if attachments:
             lines.append("- attachments:")
             for path in attachments:

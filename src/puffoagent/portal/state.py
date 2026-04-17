@@ -51,29 +51,86 @@ def archived_dir() -> Path:
 
 
 def docker_dir() -> Path:
-    """Root for puffoagent-owned docker state.
-
-    Separate from the host user's ``~/.claude`` so bot activity
-    (sessions, caches, history) stays contained and doesn't pollute
-    the user's personal Claude Code state.
-    """
+    """Root for puffoagent-owned docker-specific state (mcp scripts,
+    shared primer, default-image build context). Not for per-agent
+    claude state — see ``agent_home_dir`` for that."""
     return home_dir() / "docker"
 
 
-def docker_creds_dir() -> Path:
-    """OAuth credentials dir bind-mounted into every cli-docker
-    container at ``/home/agent/.claude``. Seeded once from the host's
-    ``~/.claude`` on first cli-docker worker start.
-    """
-    return docker_dir() / "creds"
-
-
 def docker_shared_dir() -> Path:
-    """Shared content all cli-docker agents can reference:
-    CLAUDE.md primer, rules/, skills/. Folded into each agent's
-    workspace/.claude/CLAUDE.md at worker startup.
-    """
+    """Shared primer + skill markdown content all agents reference:
+    folded into each agent's workspace/.claude/CLAUDE.md at worker
+    startup."""
     return docker_dir() / "shared"
+
+
+def agent_home_dir(agent_id: str) -> Path:
+    """Per-agent "virtual $HOME". Used as ``HOME`` env for the
+    cli-local claude subprocess and as the bind-mount source for
+    cli-docker containers at ``/home/agent``.
+
+    Claude Code reads its USER-level state from ``$HOME/.claude/``,
+    so pointing HOME here gives each agent a fully isolated claude
+    identity — own credentials cache, own session transcripts, own
+    history.jsonl, no bleed between agents.
+    """
+    return agent_dir(agent_id)
+
+
+def agent_claude_user_dir(agent_id: str) -> Path:
+    """The ``.claude/`` inside the agent's virtual home — what Claude
+    Code actually writes to. Seeded from the operator's real
+    ``~/.claude/`` on first worker start (via ``seed_claude_home``)
+    so a one-time ``claude login`` on the host carries over."""
+    return agent_home_dir(agent_id) / ".claude"
+
+
+def shared_fs_dir() -> Path:
+    """Shared filesystem dir for cross-agent cooperation. Mounted
+    into cli-docker containers at ``/workspace/.shared`` and
+    referenced by absolute path for cli-local / sdk agents. Agents
+    can coordinate via files dropped here."""
+    return home_dir() / "shared"
+
+
+# Files to copy from the operator's real ``$HOME`` into a per-agent
+# virtual ``$HOME`` on first use. Paths are relative to ``$HOME``; we
+# lift only OAuth-essential files, not multi-MB caches or transcripts
+# the operator didn't produce for their bots.
+#
+# Note: ``.claude.json`` is a SIBLING of the ``.claude/`` dir, not
+# inside it. Claude CLI reads it from ``$HOME/.claude.json`` so we
+# mirror the same layout in the per-agent home.
+_CLAUDE_HOME_SEED_PATHS = (
+    ".claude/.credentials.json",
+    ".claude/settings.json",
+    ".claude.json",
+)
+
+
+def seed_claude_home(host_home: Path, agent_home: Path) -> bool:
+    """Seed a per-agent virtual ``$HOME`` from the operator's real
+    ``$HOME`` so each agent has its own isolated claude identity.
+    Copies ``.claude/.credentials.json`` + ``.claude/settings.json``
+    + sibling ``.claude.json``. Idempotent — never overwrites an
+    existing file so refreshed tokens from prior bot runs survive.
+    Returns True if any file was copied (diagnostic only).
+    """
+    import shutil
+    agent_home.mkdir(parents=True, exist_ok=True)
+    copied = False
+    for rel in _CLAUDE_HOME_SEED_PATHS:
+        src = host_home / rel
+        dst = agent_home / rel
+        if dst.exists() or not src.exists():
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied = True
+        except OSError:
+            continue
+    return copied
 
 
 def daemon_yml_path() -> Path:

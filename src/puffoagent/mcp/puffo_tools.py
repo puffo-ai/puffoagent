@@ -18,6 +18,27 @@ Tools exposed (prefixed ``mcp__puffo__`` when invoked from claude):
     list_channels(team="")
         List channels the bot is a member of. Lightweight discovery.
 
+    list_channel_members(channel)
+        Return the usernames + types of every member of a channel.
+
+    get_channel_history(channel, limit=20)
+        Fetch the last N posts in a channel. Each post lists its
+        sender (with bot/human type), timestamp, text, and attached
+        file names.
+
+    fetch_channel_files(channel, limit=20)
+        Back-fill attachments from recent channel history into the
+        agent's workspace at ``attachments/<post_id>/<filename>``.
+        Useful when joining a channel that already has file history.
+
+    get_post(post_ref)
+        Fetch one post by id or permalink URL. Returns text + sender
+        + timestamp + attachment list.
+
+    get_user_info(username)
+        Look up a user by @-handle. Returns username, display name,
+        email, and bot/human type.
+
     approve_permission(tool_name, input)
         (cli-local permission proxy.) Post a permission request to the
         owner's DM and poll for a reply ('y'/'n'/'approve'/'deny') up
@@ -44,13 +65,45 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import aiohttp
 from mcp.server.fastmcp import FastMCP
+
+
+# Mattermost permalink: https://<host>/<team>/pl/<26-char post id>
+_PERMALINK_RE = re.compile(r"/pl/([a-z0-9]{26})(?:[/?#].*)?$")
+# Bare post id: exactly 26 a-z0-9 chars.
+_POST_ID_RE = re.compile(r"^[a-z0-9]{26}$")
+
+
+def _parse_post_ref(ref: str) -> str:
+    """Accept either a raw 26-char post id or a Mattermost permalink
+    URL and return the post id. Raises on anything else.
+    """
+    ref = (ref or "").strip()
+    if _POST_ID_RE.match(ref):
+        return ref
+    m = _PERMALINK_RE.search(ref)
+    if m:
+        return m.group(1)
+    raise RuntimeError(
+        f"cannot parse post ref {ref!r}: expected a 26-char post id "
+        "or a /pl/<id> permalink"
+    )
+
+
+def _ts_to_iso(ms: int) -> str:
+    """Mattermost timestamps are milliseconds since epoch. Render as
+    UTC ISO for display."""
+    if not ms:
+        return ""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(timespec="seconds")
 
 logger = logging.getLogger("puffoagent.mcp.puffo_tools")
 
@@ -345,6 +398,204 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
                     f"{c.get('display_name') or c.get('name')}"
                 )
             return "\n".join(rows) or "(no channels)"
+
+    @mcp.tool()
+    async def list_channel_members(channel: str) -> str:
+        """List the members of a channel (by name or id).
+
+        Returns one line per member: `username (human|bot)`. Good for
+        figuring out who's present before you @-mention someone.
+        """
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            me = await _me(session)
+            channel_id = await _resolve_channel(session, cfg, me["id"], channel)
+            members = await _get(
+                session, cfg.url,
+                f"/api/v4/channels/{channel_id}/members?per_page=200",
+            )
+            rows = []
+            for m in members or []:
+                try:
+                    user = await _get(
+                        session, cfg.url,
+                        f"/api/v4/users/{m['user_id']}",
+                    )
+                except Exception:
+                    continue
+                kind = "bot" if user.get("is_bot") else "human"
+                rows.append(f"- {user.get('username', '?')} ({kind})")
+            return "\n".join(rows) or "(empty channel)"
+
+    @mcp.tool()
+    async def get_channel_history(channel: str, limit: int = 20) -> str:
+        """Fetch the last N posts in a channel (default 20, max 200).
+
+        Each line is `<iso-ts>  @<sender> (<type>): <text>`. Attached
+        filenames are appended to the line. Useful for catching up on
+        a conversation before deciding how to reply.
+        """
+        limit = max(1, min(int(limit), 200))
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            me = await _me(session)
+            channel_id = await _resolve_channel(session, cfg, me["id"], channel)
+            data = await _get(
+                session, cfg.url,
+                f"/api/v4/channels/{channel_id}/posts?per_page={limit}",
+            )
+            posts = data.get("posts") or {}
+            order = data.get("order") or []
+            # Mattermost returns order newest-first; reverse so the
+            # agent reads in chronological order.
+            rows = []
+            for pid in reversed(order):
+                post = posts.get(pid) or {}
+                sender_id = post.get("user_id", "")
+                try:
+                    user = await _get(
+                        session, cfg.url, f"/api/v4/users/{sender_id}",
+                    )
+                except Exception:
+                    user = {}
+                uname = user.get("username", sender_id[:8] if sender_id else "?")
+                kind = "bot" if user.get("is_bot") else "human"
+                ts = _ts_to_iso(int(post.get("create_at", 0) or 0))
+                text = (post.get("message", "") or "").replace("\n", " ")
+                file_ids = post.get("file_ids") or []
+                line = f"{ts}  @{uname} ({kind}): {text}"
+                if file_ids:
+                    names = []
+                    for fid in file_ids:
+                        try:
+                            info = await _get(
+                                session, cfg.url, f"/api/v4/files/{fid}/info",
+                            )
+                            names.append(info.get("name", fid))
+                        except Exception:
+                            names.append(fid)
+                    line += f"  [files: {', '.join(names)}]"
+                rows.append(line)
+            return "\n".join(rows) or "(no posts)"
+
+    @mcp.tool()
+    async def fetch_channel_files(channel: str, limit: int = 20) -> str:
+        """Back-fill file attachments from recent channel history into
+        your workspace so your Read tool can open them.
+
+        Walks the last N posts, downloads every attached file to
+        ``attachments/<post_id>/<filename>`` inside your workspace,
+        and returns one line per downloaded file.
+        """
+        limit = max(1, min(int(limit), 200))
+        workspace = Path(cfg.workspace)
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            me = await _me(session)
+            channel_id = await _resolve_channel(session, cfg, me["id"], channel)
+            data = await _get(
+                session, cfg.url,
+                f"/api/v4/channels/{channel_id}/posts?per_page={limit}",
+            )
+            posts = data.get("posts") or {}
+            order = data.get("order") or []
+            saved: list[str] = []
+            for pid in reversed(order):
+                post = posts.get(pid) or {}
+                file_ids = post.get("file_ids") or []
+                if not file_ids:
+                    continue
+                dest_root = workspace / "attachments" / pid
+                try:
+                    dest_root.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    continue
+                for fid in file_ids:
+                    try:
+                        info = await _get(
+                            session, cfg.url, f"/api/v4/files/{fid}/info",
+                        )
+                        filename = os.path.basename(info.get("name") or fid) or fid
+                        dest = dest_root / filename
+                        if dest.exists():
+                            saved.append(f"attachments/{pid}/{filename} (cached)")
+                            continue
+                        async with session.get(
+                            f"{cfg.url.rstrip('/')}/api/v4/files/{fid}",
+                        ) as resp:
+                            if resp.status != 200:
+                                continue
+                            data_bytes = await resp.read()
+                        dest.write_bytes(data_bytes)
+                        saved.append(f"attachments/{pid}/{filename}")
+                    except Exception:
+                        continue
+            return "\n".join(saved) or "(no attachments in recent history)"
+
+    @mcp.tool()
+    async def get_post(post_ref: str) -> str:
+        """Fetch one post by its id or Mattermost permalink URL.
+
+        post_ref: either a raw 26-char post id, or a URL of the form
+            ``https://server/teamname/pl/<postid>`` (a permalink).
+        Returns sender + timestamp + message text + attached filenames.
+        """
+        post_id = _parse_post_ref(post_ref)
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            post = await _get(session, cfg.url, f"/api/v4/posts/{post_id}")
+            try:
+                user = await _get(
+                    session, cfg.url, f"/api/v4/users/{post.get('user_id', '')}",
+                )
+            except Exception:
+                user = {}
+            uname = user.get("username", "?")
+            kind = "bot" if user.get("is_bot") else "human"
+            ts = _ts_to_iso(int(post.get("create_at", 0) or 0))
+            text = post.get("message", "") or ""
+            file_ids = post.get("file_ids") or []
+            lines = [
+                f"post_id: {post_id}",
+                f"sender: @{uname} ({kind})",
+                f"timestamp: {ts}",
+                f"message:\n{text}",
+            ]
+            if file_ids:
+                names = []
+                for fid in file_ids:
+                    try:
+                        info = await _get(
+                            session, cfg.url, f"/api/v4/files/{fid}/info",
+                        )
+                        names.append(info.get("name", fid))
+                    except Exception:
+                        names.append(fid)
+                lines.append(f"attachments: {', '.join(names)}")
+            return "\n".join(lines)
+
+    @mcp.tool()
+    async def get_user_info(username: str) -> str:
+        """Look up a user by their @-handle.
+
+        Returns username, display name, email, and bot/human type.
+        Useful when you're about to DM someone and want to confirm
+        who they are, or when you want to know if a name in a message
+        is a bot.
+        """
+        username = (username or "").lstrip("@").strip()
+        if not username:
+            raise RuntimeError("username is required")
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            user = await _get(
+                session, cfg.url, f"/api/v4/users/username/{username}",
+            )
+        kind = "bot" if user.get("is_bot") else "human"
+        display = (
+            f"{user.get('first_name', '')} {user.get('last_name', '')}"
+        ).strip() or user.get("nickname") or user.get("username", "")
+        return (
+            f"username: {user.get('username', '')}\n"
+            f"display: {display}\n"
+            f"email: {user.get('email', '')}\n"
+            f"type: {kind}"
+        )
 
     @mcp.tool()
     async def approve_permission(

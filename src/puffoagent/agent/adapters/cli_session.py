@@ -162,6 +162,21 @@ class ClaudeSession:
             await self._ensure_running(system_prompt)
             return await self._one_turn(user_message)
 
+    async def warm(self, system_prompt: str) -> None:
+        """Spawn the claude subprocess without running a turn so the
+        first real message doesn't wait ~15s for process + init.
+        Idempotent: safe to call even if the process is already
+        running.
+        """
+        async with self._lock:
+            await self._ensure_running(system_prompt)
+
+    def has_persisted_session(self) -> bool:
+        """True when we have a saved session id from a previous run
+        — i.e. eager warming would resume an existing conversation
+        rather than just paying startup cost for an idle agent."""
+        return bool(self._session_id)
+
     async def aclose(self) -> None:
         async with self._lock:
             await self._kill_proc()

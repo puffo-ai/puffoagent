@@ -35,10 +35,11 @@ from .state import (
     RuntimeConfig,
     RuntimeState,
     agent_dir,
+    agent_home_dir,
     cli_session_json_path,
-    docker_creds_dir,
     docker_dir,
     docker_shared_dir,
+    shared_fs_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,8 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             workspace_dir=str(agent_cfg.resolve_workspace_dir()),
             claude_dir=str(agent_cfg.resolve_claude_dir()),
             session_file=str(cli_session_json_path(agent_cfg.id)),
-            creds_dir=str(docker_creds_dir()),
+            agent_home_dir=str(agent_home_dir(agent_cfg.id)),
+            shared_fs_dir=str(shared_fs_dir()),
             mcp_script_dir=str(docker_dir() / "mcp"),
             mattermost_url=agent_cfg.mattermost.url,
             mattermost_token=agent_cfg.mattermost.bot_token,
@@ -108,6 +110,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             claude_dir=str(agent_cfg.resolve_claude_dir()),
             session_file=str(cli_session_json_path(agent_cfg.id)),
             mcp_config_file=str(agent_dir(agent_cfg.id) / "mcp-config.json"),
+            agent_home_dir=str(agent_home_dir(agent_cfg.id)),
             mattermost_url=agent_cfg.mattermost.url,
             mattermost_token=agent_cfg.mattermost.bot_token,
             team=agent_cfg.mattermost.team_name,
@@ -245,12 +248,29 @@ class Worker:
             self.runtime.save(agent_id)
             return
 
-        async def on_message(channel_id, channel_name, sender, sender_email, text, root_id, direct, attachments):
+        # Warm the adapter so agents with a persisted session re-spawn
+        # their claude subprocess right now rather than on the first
+        # DM. Failure here is non-fatal — the warm path is an
+        # optimisation, not a requirement — so log and continue.
+        try:
+            await self._adapter.warm(claude_md)
+        except Exception as exc:
+            logger.warning(
+                "agent %s: warm() failed (will retry on first turn): %s",
+                agent_id, exc,
+            )
+
+        async def on_message(
+            channel_id, channel_name, sender, sender_email, text,
+            root_id, direct, attachments, sender_is_bot, mentions,
+        ):
             typing_task = asyncio.ensure_future(_keep_typing(client, channel_id, root_id))
             try:
                 reply = await puffo.handle_message(
                     channel_id, channel_name, sender, sender_email, text, direct,
                     attachments=attachments,
+                    sender_is_bot=sender_is_bot,
+                    mentions=mentions,
                 )
             except Exception as exc:
                 logger.error("agent %s: handle_message error: %s", agent_id, exc, exc_info=True)

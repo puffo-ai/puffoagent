@@ -27,6 +27,11 @@ PUFFO_TOOL_NAMES = (
     "send_message",
     "upload_file",
     "list_channels",
+    "list_channel_members",
+    "get_channel_history",
+    "fetch_channel_files",
+    "get_post",
+    "get_user_info",
     "approve_permission",
 )
 PUFFO_TOOL_FQNS = tuple(f"mcp__{MCP_SERVER_NAME}__{t}" for t in PUFFO_TOOL_NAMES)

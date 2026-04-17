@@ -35,6 +35,7 @@ task #38.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from ...mcp.config import (
     mcp_env,
     write_cli_mcp_config,
 )
+from ...portal.state import seed_claude_home
 from .base import Adapter, TurnContext, TurnResult
 from .cli_session import AuditLog, ClaudeSession
 
@@ -59,6 +61,7 @@ class LocalCLIAdapter(Adapter):
         claude_dir: str,
         session_file: str,
         mcp_config_file: str,
+        agent_home_dir: str,
         mattermost_url: str = "",
         mattermost_token: str = "",
         team: str = "",
@@ -70,6 +73,11 @@ class LocalCLIAdapter(Adapter):
         self.claude_dir = claude_dir
         self.session_file = Path(session_file)
         self.mcp_config_file = Path(mcp_config_file)
+        # Per-agent virtual $HOME. We point the claude subprocess's
+        # HOME / USERPROFILE env at this so its ``~/.claude`` resolves
+        # to ``agents/<id>/.claude`` — isolated per agent, no pollution
+        # of the operator's personal ~/.claude state.
+        self.agent_home_dir = Path(agent_home_dir)
         self.mattermost_url = mattermost_url
         self.mattermost_token = mattermost_token
         self.team = team
@@ -79,26 +87,58 @@ class LocalCLIAdapter(Adapter):
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         self._verify()
-        if self._session is None:
-            extra = self._prepare_mcp_args()
-            self._session = ClaudeSession(
-                agent_id=self.agent_id,
-                session_file=self.session_file,
-                build_command=self._build_command,
-                cwd=self.workspace_dir,
-                audit=AuditLog(
-                    Path(self.workspace_dir) / ".puffoagent" / "audit.log",
-                    self.agent_id,
-                ),
-                extra_args=extra,
-            )
+        session = self._ensure_session()
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
-        return await self._session.run_turn(user_message, ctx.system_prompt)
+        return await session.run_turn(user_message, ctx.system_prompt)
+
+    async def warm(self, system_prompt: str) -> None:
+        """Spawn the claude subprocess eagerly so the first DM
+        doesn't wait for cold start. Only actually spawns if this
+        agent has a persisted session — a fresh agent waits for its
+        first message to avoid paying for permanently-idle bots.
+        """
+        self._verify()
+        session = self._ensure_session()
+        if not session.has_persisted_session():
+            logger.info(
+                "agent %s: no persisted session; deferring spawn until first message",
+                self.agent_id,
+            )
+            return
+        await session.warm(system_prompt)
 
     async def aclose(self) -> None:
         if self._session is not None:
             await self._session.aclose()
             self._session = None
+
+    def _ensure_session(self) -> ClaudeSession:
+        if self._session is not None:
+            return self._session
+        extra = self._prepare_mcp_args()
+        # Point the subprocess at the per-agent virtual home so
+        # claude's ``~/.claude`` resolves inside this agent's own
+        # dir. Both HOME (POSIX) and USERPROFILE (Node on Windows)
+        # need to be set because Claude Code uses Node's
+        # ``os.homedir()``.
+        env = {
+            **os.environ,
+            "HOME": str(self.agent_home_dir),
+            "USERPROFILE": str(self.agent_home_dir),
+        }
+        self._session = ClaudeSession(
+            agent_id=self.agent_id,
+            session_file=self.session_file,
+            build_command=self._build_command,
+            cwd=self.workspace_dir,
+            env=env,
+            audit=AuditLog(
+                Path(self.workspace_dir) / ".puffoagent" / "audit.log",
+                self.agent_id,
+            ),
+            extra_args=extra,
+        )
+        return self._session
 
     def _build_command(self, extra_args: list[str]) -> list[str]:
         # NOTE: do NOT pass --dangerously-skip-permissions. cli-local
@@ -155,12 +195,26 @@ class LocalCLIAdapter(Adapter):
                 "(`npm install -g @anthropic-ai/claude-code`) to use runtime "
                 "kind 'cli-local'."
             )
-        creds = Path.home() / ".claude" / ".credentials.json"
-        if not creds.exists():
+        # Seed this agent's per-agent virtual $HOME from the
+        # operator's real $HOME on first use. Isolated per agent —
+        # one-time `claude login` on the host covers every cli-local
+        # agent. Covers .claude/.credentials.json,
+        # .claude/settings.json, and sibling .claude.json.
+        host_home = Path.home()
+        self.agent_home_dir.mkdir(parents=True, exist_ok=True)
+        seeded = seed_claude_home(host_home, self.agent_home_dir)
+        if seeded:
+            logger.info(
+                "agent %s: seeded per-agent virtual $HOME at %s from %s",
+                self.agent_id, self.agent_home_dir, host_home,
+            )
+        agent_claude = self.agent_home_dir / ".claude"
+        if not (agent_claude / ".credentials.json").exists():
             logger.warning(
-                "agent %s: %s not found. run `claude login` on the host "
-                "or the first turn will fail with an auth error.",
-                self.agent_id, creds,
+                "agent %s: no .credentials.json in %s (and none at %s). "
+                "run `claude login` on the host — first turn will fail "
+                "with an auth error otherwise.",
+                self.agent_id, agent_claude, host_home / ".claude",
             )
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
         Path(self.claude_dir).mkdir(parents=True, exist_ok=True)

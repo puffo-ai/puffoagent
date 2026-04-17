@@ -1,10 +1,14 @@
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 import aiohttp
 
 from ._logging import agent_logger
+
+
+_MENTION_RE = re.compile(r"@([a-zA-Z0-9._-]+)")
 
 # How often to refresh the online status (seconds)
 STATUS_HEARTBEAT_INTERVAL = 30
@@ -208,6 +212,38 @@ class MattermostClient:
             async with session.get(f"{self.url}/api/v4/users/{user_id}") as resp:
                 return await resp.json()
 
+    async def _resolve_mentions(
+        self, session: aiohttp.ClientSession, text: str,
+    ) -> list[dict]:
+        """Parse ``@name`` mentions from ``text`` and look each up on
+        the server so the agent sees who's human vs. bot. Duplicates
+        are deduped; unknown names (not valid users) are dropped.
+
+        Returns a list of ``{"username": str, "is_bot": bool}`` in
+        order of first appearance.
+        """
+        resolved: list[dict] = []
+        seen: set[str] = set()
+        for m in _MENTION_RE.finditer(text or ""):
+            name = m.group(1)
+            if name in seen or name == self.bot_username:
+                continue
+            seen.add(name)
+            try:
+                async with session.get(
+                    f"{self.url}/api/v4/users/username/{name}",
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    user = await resp.json()
+            except Exception:
+                continue
+            resolved.append({
+                "username": user.get("username", name),
+                "is_bot": bool(user.get("is_bot", False)),
+            })
+        return resolved
+
     async def _download_attachments(
         self, session: aiohttp.ClientSession, post_id: str, file_ids: list[str],
     ) -> list[str]:
@@ -356,11 +392,17 @@ class MattermostClient:
         user = await self.get_user(sender_id)
         sender_name = user.get("username", sender_id)
         sender_email = user.get("email", "")
+        sender_is_bot = bool(user.get("is_bot", False))
 
         # Pre-download any attached files to the agent's workspace so
         # the agent's Read tool can open them. Relative paths so the
         # same string works on host and in the container.
         attachments = await self._download_attachments(session, post_id, file_ids)
+
+        # Resolve any @-mentions in the message so the agent can
+        # distinguish human targets from bot/agent targets and decide
+        # whether a reply is needed.
+        mentions = await self._resolve_mentions(session, text)
 
         clean_text = text.replace(f"@{self.bot_username}", "").strip()
         attach_summary = f" +{len(attachments)} attachment(s)" if attachments else ""
@@ -371,4 +413,5 @@ class MattermostClient:
         await on_message(
             channel_id, channel_name, sender_name, sender_email,
             clean_text, root_id, is_dm or is_mention, attachments,
+            sender_is_bot, mentions,
         )
