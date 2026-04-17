@@ -29,9 +29,9 @@ import aiohttp
 
 from .state import (
     AgentConfig,
-    AgentProviderOverride,
     DaemonConfig,
     MattermostConfig,
+    RuntimeConfig,
     TriggerRules,
     agent_dir,
     agents_dir,
@@ -163,12 +163,19 @@ def _apply_remote(agent_id: str, remote: dict) -> None:
 
     cfg = AgentConfig(
         id=agent_id,
-        state=remote.get("state", "running"),
+        # ``state`` is locally owned after the agent is materialised.
+        # ``puffoagent agent pause`` / ``resume`` on the host would
+        # otherwise race the next sync tick, which would reset state
+        # to whatever the server last reported. Sync only seeds state
+        # on initial creation. Server-side pause/resume signals need
+        # a separate propagation channel (TODO: task #1 follow-up).
+        state=existing.state if existing else remote.get("state", "running"),
         display_name=remote.get("display_name", agent_id),
         mattermost=mattermost,
-        ai=AgentProviderOverride(),
+        runtime=existing.runtime if existing else RuntimeConfig(),
         profile="profile.md",
         memory_dir="memory",
+        workspace_dir="workspace",
         triggers=TriggerRules(),
         created_at=existing.created_at if existing else int(time.time()),
     )

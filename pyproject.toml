@@ -32,6 +32,12 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+# pip install puffoagent[sdk]  — needed for agents with runtime.kind=sdk
+sdk = ["claude-agent-sdk>=0.1.61"]
+# cli-local / cli-docker adapters don't need extra Python deps; they
+# shell out to the `claude` binary (cli-local) or Docker (cli-docker).
+
 [project.urls]
 Homepage      = "https://github.com/puffo-ai/puffoagent"
 Source        = "https://github.com/puffo-ai/puffoagent"

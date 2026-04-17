@@ -121,13 +121,16 @@ class Daemon:
 
 
 def _worker_needs_restart(old, new) -> bool:
-    """Return True when connection-critical fields changed. These require
-    tearing down the existing Mattermost WebSocket since the worker
-    holds them in memory."""
+    """Return True when fields that live inside the worker's in-memory
+    state changed: the Mattermost WebSocket credentials, the profile
+    path, or anything about the adapter runtime (kind / provider /
+    model / api_key).
+    """
     return (
         old.mattermost.url != new.mattermost.url
         or old.mattermost.bot_token != new.mattermost.bot_token
         or old.profile != new.profile
+        or old.runtime != new.runtime
     )
 
 

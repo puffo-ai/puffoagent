@@ -1,10 +1,10 @@
 import os
-import logging
+
+from ._logging import agent_logger
+from .adapters import Adapter, TurnContext
 from .memory import MemoryManager
 from .skills_loader import SkillsLoader
 from .usage_tracker import UsageTracker
-
-logger = logging.getLogger(__name__)
 
 MAX_LOG_ENTRIES = 60
 
@@ -15,25 +15,37 @@ CATEGORY_LABEL = {"soul": "Soul", "skills": "Skills", "memory": "Memory"}
 class PuffoAgent:
     def __init__(
         self,
-        provider,
+        adapter: Adapter,
         profile_path: str,
         memory_dir: str,
-        skills_dir: str = "",
+        skills_dirs: list[str] | None = None,
+        workspace_dir: str = "",
+        claude_dir: str = "",
+        agent_id: str = "",
     ):
-        """Per-agent state owned by the portal.
+        """Per-agent shell owned by the portal.
 
-        The portal passes absolute paths so multiple agents can coexist in
-        the same process without stomping on each other. skills_dir is
-        optional — an empty string disables the skills loader.
+        The shell owns cross-cutting state (conversation log, memory,
+        usage, system-prompt assembly) and delegates each turn to an
+        ``Adapter``. The adapter owns the agentic loop — see
+        ``adapters/base.py``.
+
+        ``skills_dirs`` is a list of directories to merge into the
+        skills context: typically ``[daemon_cfg.skills_dir,
+        <claude_dir>/skills]`` so agents see both daemon-wide and
+        per-agent skills. Earlier entries win on name collision.
         """
-        self.provider = provider
-        # base_dir is used by the `!profile` debug command to locate the
-        # agent's companion directories (agents/, skills/, memory/).
+        self.adapter = adapter
         self.base_dir = os.path.dirname(os.path.abspath(profile_path))
+        self.workspace_dir = workspace_dir
+        self.claude_dir = claude_dir
+        self.agent_id = agent_id
+        self.logger = agent_logger(__name__, agent_id)
 
         self.memory = MemoryManager(memory_dir)
-        self.skills = SkillsLoader(skills_dir) if skills_dir else None
-        self.usage = UsageTracker(memory_dir)
+        self.memory_dir = memory_dir
+        self.skills = SkillsLoader(skills_dirs or [])
+        self.usage = UsageTracker(memory_dir, agent_id=agent_id)
 
         with open(profile_path, "r", encoding="utf-8") as f:
             self.profile = f.read()
@@ -44,7 +56,6 @@ class PuffoAgent:
     # ── Special commands ──────────────────────────────────────────────────────
 
     def _cmd_profile(self) -> str:
-        """Return all .md files formatted as markdown."""
         dirs = [
             ("soul",   os.path.join(self.base_dir, "agents")),
             ("skills", os.path.join(self.base_dir, "skills")),
@@ -68,7 +79,6 @@ class PuffoAgent:
         return "\n\n".join(parts)
 
     def _cmd_usage(self) -> str:
-        """Return token usage stats formatted as markdown."""
         stats = self.usage.stats()
         at = stats["all_time"]
         lines = [
@@ -78,7 +88,7 @@ class PuffoAgent:
             f"over {at['calls']:,} calls\n",
         ]
         for granularity in ("daily", "weekly", "monthly", "hourly"):
-            periods = stats[granularity][-10:]  # last 10 periods
+            periods = stats[granularity][-10:]
             if not periods:
                 continue
             label = granularity.title()
@@ -92,12 +102,18 @@ class PuffoAgent:
 
     # ── Message handling ──────────────────────────────────────────────────────
 
-    def handle_message(
-        self, channel_id: str, channel_name: str, sender: str, sender_email: str, text: str, direct: bool = False
+    async def handle_message(
+        self,
+        channel_id: str,
+        channel_name: str,
+        sender: str,
+        sender_email: str,
+        text: str,
+        direct: bool = False,
+        on_progress=None,
     ) -> str | None:
         cmd = text.strip().lower()
 
-        # Special commands — bypass the LLM entirely
         if cmd == "!profile":
             return self._cmd_profile()
         if cmd == "!usage":
@@ -105,16 +121,23 @@ class PuffoAgent:
 
         self._append_user(channel_name, sender, sender_email, text)
 
-        system_prompt = self._build_system_prompt()
-        reply, input_tokens, output_tokens = self.provider.complete(system_prompt, list(self.log))
-        self.usage.record(input_tokens, output_tokens)
+        ctx = TurnContext(
+            system_prompt=self._build_system_prompt(),
+            messages=list(self.log),
+            workspace_dir=self.workspace_dir,
+            claude_dir=self.claude_dir,
+            memory_dir=self.memory_dir,
+            on_progress=on_progress,
+        )
+        result = await self.adapter.run_turn(ctx)
+        self.usage.record(result.input_tokens, result.output_tokens)
 
-        if reply.strip() == "[SILENT]":
-            logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
+        if not result.reply or result.reply.strip() == "[SILENT]":
+            self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
             return None
 
-        self._append_assistant(channel_name, reply)
-        return reply
+        self._append_assistant(channel_name, result.reply)
+        return result.reply
 
     def _append_user(self, channel_name: str, sender: str, sender_email: str, text: str):
         # Structured markdown block makes it obvious to the LLM what is
@@ -130,7 +153,6 @@ class PuffoAgent:
         self._truncate_log()
 
     def _append_assistant(self, channel_name: str, reply: str):
-        # Store the assistant reply as-is, no channel/sender prefix.
         self.log.append({"role": "assistant", "content": reply})
         self._truncate_log()
 
@@ -143,8 +165,7 @@ class PuffoAgent:
         memory_ctx = self.memory.get_context()
         if memory_ctx:
             parts.append(memory_ctx)
-        if self.skills is not None:
-            skills_ctx = self.skills.get_context()
-            if skills_ctx:
-                parts.append(skills_ctx)
+        skills_ctx = self.skills.get_context()
+        if skills_ctx:
+            parts.append(skills_ctx)
         return "\n\n".join(parts)

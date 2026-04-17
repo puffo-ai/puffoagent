@@ -26,10 +26,10 @@ from pathlib import Path
 from .daemon import run_daemon
 from .state import (
     AgentConfig,
-    AgentProviderOverride,
     DaemonConfig,
     MattermostConfig,
     ProviderConfig,
+    RuntimeConfig,
     RuntimeState,
     TriggerRules,
     agent_dir,
@@ -114,7 +114,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     cfg.save()
     print(f"wrote {daemon_yml_path()}")
     print(f"agents dir: {agents_dir()}")
-    print("next: puffoagent agent create --id <id> --url <mm url> --token <bot token> --channels general,random")
+    print()
+    print("agent runtime choices (per agent, set at create time):")
+    print("  chat-only    conversational LLM, no tools (default, uses the keys above)")
+    print("  sdk          in-process Claude agent loop w/ tools  [pip install puffoagent[sdk]]")
+    print("  cli-local    claude CLI on the host, --dangerously-skip-permissions [run `claude login` first]")
+    print("  cli-docker   claude CLI inside a per-agent container  [Docker + `claude login` on host]")
+    print()
+    print("next: puffoagent agent create --id <id> --runtime <kind> \\")
+    print("        --url <mm url> --token <bot token> --channels general,random")
     return 0
 
 
@@ -231,13 +239,15 @@ def cmd_agent_create(args: argparse.Namespace) -> int:
             bot_token=args.token,
             team_name=args.team or "",
         ),
-        ai=AgentProviderOverride(
+        runtime=RuntimeConfig(
+            kind=args.runtime or "chat-only",
             provider=args.provider or "",
             api_key=args.api_key or "",
             model=args.model or "",
         ),
         profile="profile.md",
         memory_dir="memory",
+        workspace_dir="workspace",
         triggers=TriggerRules(
             on_mention=not args.no_mention,
             on_dm=not args.no_dm,
@@ -318,10 +328,16 @@ def cmd_agent_show(args: argparse.Namespace) -> int:
     print(f"memory_dir:      {ac.resolve_memory_dir()}")
     print(f"mattermost url:  {ac.mattermost.url}")
     print(f"mattermost team: {ac.mattermost.team_name or '(not set)'}")
-    print(f"ai override:     provider={ac.ai.provider or '(default)'} model={ac.ai.model or '(default)'}")
+    print(f"workspace_dir:   {ac.resolve_workspace_dir()}")
+    print(f"claude_dir:      {ac.resolve_claude_dir()}  (derived)")
+    print("runtime:")
+    print(f"  kind:          {ac.runtime.kind}")
+    print(f"  provider:      {ac.runtime.provider or '(default)'}")
+    print(f"  model:         {ac.runtime.model or '(default)'}")
+    print(f"  api_key:       {'(set)' if ac.runtime.api_key else '(inherit)'}")
     print(f"triggers:        on_mention={ac.triggers.on_mention} on_dm={ac.triggers.on_dm}")
     if rs is not None:
-        print("runtime:")
+        print("status:")
         print(f"  status:        {rs.status}")
         print(f"  msg_count:     {rs.msg_count}")
         print(f"  last_event_at: {_format_ts(rs.last_event_at)}")
@@ -473,9 +489,15 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--channels", help="Comma-separated channel names (informational)")
     create.add_argument("--display-name", help="Friendly name for the agent")
     create.add_argument("--profile", help="Path to a profile.md to copy (default: built-in template)")
-    create.add_argument("--provider", help="AI provider override (anthropic|openai)")
-    create.add_argument("--api-key", help="Provider API key override")
-    create.add_argument("--model", help="Provider model override")
+    create.add_argument(
+        "--runtime",
+        choices=["chat-only", "sdk", "cli-local", "cli-docker"],
+        default="chat-only",
+        help="Runtime adapter kind (default: chat-only)",
+    )
+    create.add_argument("--provider", help="Chat-only: provider override (anthropic|openai)")
+    create.add_argument("--api-key", help="Provider/runtime API key override")
+    create.add_argument("--model", help="Model override")
     create.add_argument("--no-mention", action="store_true", help="Don't reply on @mention")
     create.add_argument("--no-dm", action="store_true", help="Don't reply on DM")
     create.set_defaults(func=cmd_agent_create)

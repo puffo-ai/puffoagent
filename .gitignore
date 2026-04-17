@@ -30,6 +30,8 @@ config.yml
 # inside the repo dir.
 agents/*/agent.yml
 agents/*/runtime.json
+agents/*/cli_session.json
 agents/*/memory/
+agents/*/workspace/
 daemon.yml
 daemon.pid

@@ -70,6 +70,13 @@ def runtime_json_path(agent_id: str) -> Path:
     return agent_dir(agent_id) / "runtime.json"
 
 
+def cli_session_json_path(agent_id: str) -> Path:
+    """Persisted Claude Code session id for cli-local/cli-docker
+    adapters. See ``agent/adapters/cli_session.py``.
+    """
+    return agent_dir(agent_id) / "cli_session.json"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataclasses
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,11 +172,26 @@ class MattermostConfig:
 
 
 @dataclass
-class AgentProviderOverride:
-    # Empty strings here mean "inherit from daemon defaults".
-    provider: str = ""
-    api_key: str = ""
+class RuntimeConfig:
+    """Contents of the ``runtime:`` block in agent.yml.
+
+    ``kind`` selects which adapter handles this agent's turns. Empty
+    strings for ``provider`` / ``model`` / ``api_key`` mean "inherit
+    from daemon defaults". Kind-specific fields (docker image, tool
+    allowlists, permission timeouts) are added here as new adapters
+    land — see DESIGN.md.
+    """
+    kind: str = "chat-only"   # chat-only | sdk | cli-local | cli-docker
+    provider: str = ""        # chat-only: anthropic | openai
     model: str = ""
+    api_key: str = ""
+    # Tool allowlist patterns (sdk | cli-local | cli-docker). Each entry
+    # is either a bare tool name ("Read") or tool-name-plus-arg glob
+    # ("Bash(git *)", "Read(**/*.py)"). Empty list = no tools allowed.
+    allowed_tools: list[str] = field(default_factory=list)
+    # cli-docker: override the default image tag. Empty → the bundled
+    # image that puffoagent builds from its inline Dockerfile.
+    docker_image: str = ""
 
 
 @dataclass
@@ -183,9 +205,15 @@ class AgentConfig:
     state: str = "running"  # running | paused
     display_name: str = ""
     mattermost: MattermostConfig = field(default_factory=MattermostConfig)
-    ai: AgentProviderOverride = field(default_factory=AgentProviderOverride)
-    profile: str = "profile.md"  # path relative to agent dir, or absolute
-    memory_dir: str = "memory"   # path relative to agent dir, or absolute
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    profile: str = "profile.md"       # path relative to agent dir, or absolute
+    memory_dir: str = "memory"        # path relative to agent dir, or absolute
+    workspace_dir: str = "workspace"  # path relative to agent dir, or absolute
+    # Per-agent .claude/ lives inside workspace_dir so the Claude Code
+    # project-level convention (.claude/CLAUDE.md, .claude/skills/, etc)
+    # is found automatically by cwd-based runtime discovery. Not a
+    # user-configurable field on purpose — treat .claude/ as owned by
+    # the adapter layer.
     triggers: TriggerRules = field(default_factory=TriggerRules)
     created_at: int = 0
 
@@ -195,7 +223,7 @@ class AgentConfig:
         with path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         mm = raw.get("mattermost") or {}
-        ai = raw.get("ai") or {}
+        rt = raw.get("runtime") or {}
         triggers = raw.get("triggers") or {}
         return cls(
             id=raw.get("id", agent_id),
@@ -206,13 +234,17 @@ class AgentConfig:
                 bot_token=mm.get("bot_token", ""),
                 team_name=mm.get("team_name", ""),
             ),
-            ai=AgentProviderOverride(
-                provider=ai.get("provider", ""),
-                api_key=ai.get("api_key", ""),
-                model=ai.get("model", ""),
+            runtime=RuntimeConfig(
+                kind=rt.get("kind", "chat-only"),
+                provider=rt.get("provider", ""),
+                model=rt.get("model", ""),
+                api_key=rt.get("api_key", ""),
+                allowed_tools=list(rt.get("allowed_tools") or []),
+                docker_image=rt.get("docker_image", ""),
             ),
             profile=raw.get("profile", "profile.md"),
             memory_dir=raw.get("memory_dir", "memory"),
+            workspace_dir=raw.get("workspace_dir", "workspace"),
             triggers=TriggerRules(
                 on_mention=bool(triggers.get("on_mention", True)),
                 on_dm=bool(triggers.get("on_dm", True)),
@@ -229,21 +261,31 @@ class AgentConfig:
             "display_name": self.display_name,
             "created_at": self.created_at,
             "mattermost": asdict(self.mattermost),
-            "ai": asdict(self.ai),
+            "runtime": asdict(self.runtime),
             "profile": self.profile,
             "memory_dir": self.memory_dir,
+            "workspace_dir": self.workspace_dir,
             "triggers": asdict(self.triggers),
         }
         _atomic_write_yaml(path, data)
 
     def resolve_profile_path(self) -> Path:
-        p = Path(self.profile)
-        if p.is_absolute():
-            return p
-        return agent_dir(self.id) / p
+        return self._resolve(self.profile)
 
     def resolve_memory_dir(self) -> Path:
-        p = Path(self.memory_dir)
+        return self._resolve(self.memory_dir)
+
+    def resolve_workspace_dir(self) -> Path:
+        return self._resolve(self.workspace_dir)
+
+    def resolve_claude_dir(self) -> Path:
+        """Always ``<workspace>/.claude``. See the comment on
+        ``AgentConfig`` for why this isn't user-configurable.
+        """
+        return self.resolve_workspace_dir() / ".claude"
+
+    def _resolve(self, rel_or_abs: str) -> Path:
+        p = Path(rel_or_abs)
         if p.is_absolute():
             return p
         return agent_dir(self.id) / p

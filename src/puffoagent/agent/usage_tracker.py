@@ -1,21 +1,21 @@
 import json
-import logging
 import os
 from datetime import datetime, timezone
 from collections import defaultdict
 
-logger = logging.getLogger(__name__)
+from ._logging import agent_logger
 
 USAGE_FILE = "token_usage.json"
 
 
 class UsageTracker:
-    def __init__(self, memory_dir: str):
+    def __init__(self, memory_dir: str, agent_id: str = ""):
         os.makedirs(memory_dir, exist_ok=True)
         self.path = os.path.join(memory_dir, USAGE_FILE)
         self.records: list[dict] = []
+        self.logger = agent_logger(__name__, agent_id)
         self._load()
-        logger.info(f"UsageTracker initialised — {len(self.records)} existing records at {self.path}")
+        self.logger.info(f"UsageTracker initialised — {len(self.records)} existing records at {self.path}")
 
     def _load(self):
         if os.path.exists(self.path):
@@ -23,7 +23,7 @@ class UsageTracker:
                 with open(self.path, "r", encoding="utf-8") as f:
                     self.records = json.load(f)
             except Exception as e:
-                logger.warning(f"Failed to load usage records from {self.path}: {e}")
+                self.logger.warning(f"Failed to load usage records from {self.path}: {e}")
                 self.records = []
 
     def _save(self):
@@ -31,7 +31,7 @@ class UsageTracker:
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(self.records, f)
         except Exception as e:
-            logger.error(f"Failed to save usage records to {self.path}: {e}")
+            self.logger.error(f"Failed to save usage records to {self.path}: {e}")
 
     def record(self, input_tokens: int, output_tokens: int):
         self.records.append({
@@ -40,7 +40,7 @@ class UsageTracker:
             "output": output_tokens,
         })
         self._save()
-        logger.info(f"Tokens recorded — input: {input_tokens}, output: {output_tokens} (total calls: {len(self.records)})")
+        self.logger.info(f"Tokens recorded — input: {input_tokens}, output: {output_tokens} (total calls: {len(self.records)})")
 
     def stats(self) -> dict:
         buckets = {

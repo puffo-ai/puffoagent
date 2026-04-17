@@ -1,9 +1,8 @@
 import asyncio
 import json
-import logging
 import aiohttp
 
-logger = logging.getLogger(__name__)
+from ._logging import agent_logger
 
 # How often to refresh the online status (seconds)
 STATUS_HEARTBEAT_INTERVAL = 30
@@ -14,7 +13,14 @@ VIEW_RECEIPT_FLUSH_INTERVAL = 5
 
 
 class MattermostClient:
-    def __init__(self, url: str, token: str, profile_name: str = "default", file_server_url: str = ""):
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        profile_name: str = "default",
+        file_server_url: str = "",
+        agent_id: str = "",
+    ):
         self.url = url.rstrip("/")
         self.token = token
         self.profile_name = profile_name
@@ -29,13 +35,14 @@ class MattermostClient:
         self._view_lock = asyncio.Lock()
         self._rpc_handler = None  # set by the agent to serve file RPC calls
         self._background_tasks: list[asyncio.Task] = []
+        self.logger = agent_logger(__name__, agent_id)
 
     async def _get_me(self, session: aiohttp.ClientSession):
         async with session.get(f"{self.url}/api/v4/users/me") as resp:
             data = await resp.json()
             self.bot_user_id = data["id"]
             self.bot_username = data["username"]
-            logger.info(f"Logged in as @{self.bot_username} ({self.bot_user_id})")
+            self.logger.info(f"Logged in as @{self.bot_username} ({self.bot_user_id})")
 
     async def _register_as_ai_agent(self, session: aiohttp.ClientSession):
         """Register with the server's AIAgents table via POST /aiagents/register.
@@ -47,10 +54,10 @@ class MattermostClient:
         }
         async with session.post(f"{self.url}/api/v4/aiagents/register", json=payload) as resp:
             if resp.status in (200, 201):
-                logger.info("Registered as puffo_ai_agent via /aiagents/register")
+                self.logger.info("Registered as puffo_ai_agent via /aiagents/register")
             else:
                 body = await resp.text()
-                logger.warning(f"Could not register as AI agent: {resp.status} {body}")
+                self.logger.warning(f"Could not register as AI agent: {resp.status} {body}")
 
     async def _ai_agent_heartbeat_loop(self, session: aiohttp.ClientSession):
         """POST /aiagents/me/heartbeat every AI_AGENT_HEARTBEAT_INTERVAL seconds.
@@ -65,9 +72,9 @@ class MattermostClient:
                     json={"status": "online"},
                 ) as resp:
                     if resp.status not in (200, 201):
-                        logger.warning(f"Heartbeat failed: {resp.status}")
+                        self.logger.warning(f"Heartbeat failed: {resp.status}")
             except Exception as e:
-                logger.warning(f"Heartbeat error: {e}")
+                self.logger.warning(f"Heartbeat error: {e}")
 
     async def record_post_viewed(self, post_id: str):
         """Buffer a post id for the next batch flush."""
@@ -96,12 +103,12 @@ class MattermostClient:
                 ) as resp:
                     if resp.status not in (200, 201):
                         body = await resp.text()
-                        logger.warning(f"View batch flush failed: {resp.status} {body}")
+                        self.logger.warning(f"View batch flush failed: {resp.status} {body}")
                         # Re-buffer on failure so we don't drop view receipts.
                         async with self._view_lock:
                             self._view_buffer.update(batch)
             except Exception as e:
-                logger.warning(f"View batch flush error: {e}")
+                self.logger.warning(f"View batch flush error: {e}")
                 async with self._view_lock:
                     self._view_buffer.update(batch)
 
@@ -125,7 +132,7 @@ class MattermostClient:
         try:
             ok, payload, error = await self._rpc_handler(cmd, args)
         except Exception as e:
-            logger.error(f"RPC handler error: {e}", exc_info=True)
+            self.logger.error(f"RPC handler error: {e}", exc_info=True)
             await self._send_rpc_response(request_id, False, None, str(e))
             return
         await self._send_rpc_response(request_id, ok, payload, error)
@@ -151,7 +158,7 @@ class MattermostClient:
             payload = {"user_id": self.bot_user_id, "status": "online"}
             async with session.put(f"{self.url}/api/v4/users/{self.bot_user_id}/status", json=payload) as resp:
                 if resp.status not in (200, 201):
-                    logger.warning(f"Failed to set online status: {resp.status}")
+                    self.logger.warning(f"Failed to set online status: {resp.status}")
 
     async def _status_heartbeat(self):
         """Keep the bot status as online by refreshing periodically."""
@@ -159,7 +166,7 @@ class MattermostClient:
             try:
                 await self._set_online()
             except Exception as e:
-                logger.warning(f"Status heartbeat error: {e}")
+                self.logger.warning(f"Status heartbeat error: {e}")
             await asyncio.sleep(STATUS_HEARTBEAT_INTERVAL)
 
     async def send_typing(self, channel_id: str, parent_id: str = ""):
@@ -174,7 +181,7 @@ class MattermostClient:
                 "data": {"channel_id": channel_id, "parent_id": parent_id},
             })
         except Exception as e:
-            logger.warning(f"Failed to send typing indicator: {e}")
+            self.logger.warning(f"Failed to send typing indicator: {e}")
 
     async def post_message(self, channel_id: str, message: str, root_id: str = ""):
         async with aiohttp.ClientSession(headers=self.headers) as session:
@@ -183,7 +190,7 @@ class MattermostClient:
                 payload["root_id"] = root_id
             async with session.post(f"{self.url}/api/v4/posts", json=payload) as resp:
                 if resp.status not in (200, 201):
-                    logger.error(f"Failed to post message: {resp.status} {await resp.text()}")
+                    self.logger.error(f"Failed to post message: {resp.status} {await resp.text()}")
 
     async def get_user(self, user_id: str) -> dict:
         async with aiohttp.ClientSession(headers=self.headers) as session:
@@ -222,14 +229,14 @@ class MattermostClient:
                         "action": "authentication_challenge",
                         "data": {"token": self.token},
                     })
-                    logger.info("WebSocket connected, listening for events...")
+                    self.logger.info("WebSocket connected, listening for events...")
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             event = json.loads(msg.data)
                             await self._handle_event(event, on_message)
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            logger.warning("WebSocket closed/error, reconnecting...")
+                            self.logger.warning("WebSocket closed/error, reconnecting...")
                             break
             finally:
                 # Always kill the background loops before letting the session
@@ -285,5 +292,5 @@ class MattermostClient:
         sender_email = user.get("email", "")
 
         clean_text = text.replace(f"@{self.bot_username}", "").strip()
-        logger.info(f"[{'dm' if is_dm else 'mention' if is_mention else 'channel'}] [{channel_name}] @{sender_name}: {clean_text}")
+        self.logger.info(f"[{'dm' if is_dm else 'mention' if is_mention else 'channel'}] [{channel_name}] @{sender_name}: {clean_text}")
         await on_message(channel_id, channel_name, sender_name, sender_email, clean_text, root_id, is_dm or is_mention)

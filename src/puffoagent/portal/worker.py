@@ -2,7 +2,8 @@
 
 Each running agent gets a single asyncio.Task owning a `Worker` instance.
 The worker:
-  - instantiates PuffoAgent + MattermostClient from the agent's config
+  - instantiates PuffoAgent + an Adapter + MattermostClient from the
+    agent's config
   - runs the WebSocket listen loop with supervising backoff on errors
   - writes runtime.json every `runtime_heartbeat_seconds` so the CLI can
     show live stats without any IPC
@@ -16,14 +17,17 @@ import logging
 import time
 from pathlib import Path
 
+from ..agent.adapters import Adapter
 from ..agent.core import PuffoAgent
 from ..agent.file_browser import FileBrowser
 from ..agent.mattermost_client import MattermostClient
 from .state import (
     AgentConfig,
     DaemonConfig,
+    RuntimeConfig,
     RuntimeState,
     agent_dir,
+    cli_session_json_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,33 +35,92 @@ logger = logging.getLogger(__name__)
 RECONNECT_BACKOFF_SECONDS = 5.0
 
 
-def build_provider(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig):
-    """Resolve the AI provider for an agent, preferring per-agent overrides."""
-    provider_name = agent_cfg.ai.provider or daemon_cfg.default_provider
+def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
+    """Select and construct the adapter for an agent based on
+    ``runtime.kind``. Raises if the selected kind is unknown or
+    misconfigured.
+    """
+    kind = agent_cfg.runtime.kind or "chat-only"
+
+    if kind == "chat-only":
+        from ..agent.adapters.chat_only import ChatOnlyAdapter
+        provider = _build_legacy_provider(daemon_cfg, agent_cfg.runtime)
+        return ChatOnlyAdapter(provider)
+
+    if kind == "sdk":
+        from ..agent.adapters.sdk import SDKAdapter
+        api_key = agent_cfg.runtime.api_key or daemon_cfg.anthropic.api_key
+        model = agent_cfg.runtime.model or daemon_cfg.anthropic.model or "claude-sonnet-4-6"
+        if not api_key:
+            raise RuntimeError(
+                f"agent {agent_cfg.id!r}: runtime kind 'sdk' requires an anthropic "
+                "api_key in daemon.yml or agent.yml"
+            )
+        return SDKAdapter(
+            api_key=api_key,
+            model=model,
+            allowed_tools=agent_cfg.runtime.allowed_tools,
+        )
+
+    # The claude CLI adapters authenticate via OAuth credentials the
+    # user set up once with `claude login` on the host. We do NOT pass
+    # an api_key through; the CLI uses ~/.claude/.credentials.json
+    # directly. The model override still flows through for users who
+    # want a specific claude model per agent.
+    if kind == "cli-docker":
+        from ..agent.adapters.docker_cli import DockerCLIAdapter
+        return DockerCLIAdapter(
+            agent_id=agent_cfg.id,
+            model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
+            image=agent_cfg.runtime.docker_image,
+            workspace_dir=str(agent_cfg.resolve_workspace_dir()),
+            claude_dir=str(agent_cfg.resolve_claude_dir()),
+            session_file=str(cli_session_json_path(agent_cfg.id)),
+        )
+
+    if kind == "cli-local":
+        from ..agent.adapters.local_cli import LocalCLIAdapter
+        return LocalCLIAdapter(
+            agent_id=agent_cfg.id,
+            model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
+            workspace_dir=str(agent_cfg.resolve_workspace_dir()),
+            claude_dir=str(agent_cfg.resolve_claude_dir()),
+            session_file=str(cli_session_json_path(agent_cfg.id)),
+        )
+
+    raise RuntimeError(
+        f"agent {agent_cfg.id!r}: unknown runtime kind {kind!r} "
+        "(valid: chat-only, sdk, cli-docker, cli-local)"
+    )
+
+
+def _build_legacy_provider(daemon_cfg: DaemonConfig, runtime: RuntimeConfig):
+    """Build an Anthropic/OpenAI message-completion provider for the
+    chat-only adapter. Per-agent overrides win over daemon defaults.
+    """
+    provider_name = runtime.provider or daemon_cfg.default_provider
 
     if provider_name == "anthropic":
         from ..agent.providers.anthropic_provider import AnthropicProvider
-        api_key = agent_cfg.ai.api_key or daemon_cfg.anthropic.api_key
-        model = agent_cfg.ai.model or daemon_cfg.anthropic.model or "claude-sonnet-4-6"
+        api_key = runtime.api_key or daemon_cfg.anthropic.api_key
+        model = runtime.model or daemon_cfg.anthropic.model or "claude-sonnet-4-6"
         if not api_key:
             raise RuntimeError(
-                f"agent {agent_cfg.id!r}: anthropic api_key is not set in "
-                "daemon.yml or agent.yml"
+                "anthropic api_key is not set in daemon.yml or agent.yml"
             )
         return AnthropicProvider(api_key=api_key, model=model)
 
     if provider_name == "openai":
         from ..agent.providers.openai_provider import OpenAIProvider
-        api_key = agent_cfg.ai.api_key or daemon_cfg.openai.api_key
-        model = agent_cfg.ai.model or daemon_cfg.openai.model or "gpt-4o"
+        api_key = runtime.api_key or daemon_cfg.openai.api_key
+        model = runtime.model or daemon_cfg.openai.model or "gpt-4o"
         if not api_key:
             raise RuntimeError(
-                f"agent {agent_cfg.id!r}: openai api_key is not set in "
-                "daemon.yml or agent.yml"
+                "openai api_key is not set in daemon.yml or agent.yml"
             )
         return OpenAIProvider(api_key=api_key, model=model)
 
-    raise RuntimeError(f"agent {agent_cfg.id!r}: unknown provider {provider_name!r}")
+    raise RuntimeError(f"unknown provider {provider_name!r}")
 
 
 class Worker:
@@ -73,16 +136,15 @@ class Worker:
         )
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._adapter: Adapter | None = None
 
     def start(self) -> asyncio.Task:
-        """Launch the main coroutine as a task. Idempotent."""
         if self._task is not None and not self._task.done():
             return self._task
         self._task = asyncio.ensure_future(self._run())
         return self._task
 
     async def stop(self) -> None:
-        """Request the worker to stop and await its exit."""
         self._stop.set()
         if self._task is not None:
             self._task.cancel()
@@ -90,30 +152,54 @@ class Worker:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+        if self._adapter is not None:
+            try:
+                await self._adapter.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "agent %s: adapter aclose failed: %s", self.agent_cfg.id, exc,
+                )
         self.runtime.status = "stopped"
         self.runtime.save(self.agent_cfg.id)
 
     async def _run(self) -> None:
-        """Main loop: instantiate agent + client, run listen() with backoff."""
         agent_id = self.agent_cfg.id
         try:
-            provider = build_provider(self.daemon_cfg, self.agent_cfg)
+            self._adapter = build_adapter(self.daemon_cfg, self.agent_cfg)
             profile_path = str(self.agent_cfg.resolve_profile_path())
             memory_path = str(self.agent_cfg.resolve_memory_dir())
-            skills_dir = self.daemon_cfg.skills_dir or ""
+            workspace_path = str(self.agent_cfg.resolve_workspace_dir())
+            claude_path = str(self.agent_cfg.resolve_claude_dir())
             Path(memory_path).mkdir(parents=True, exist_ok=True)
+            Path(workspace_path).mkdir(parents=True, exist_ok=True)
+            _seed_claude_dir(Path(claude_path))
 
+            # Skills layer daemon-wide first (shared conventions) then
+            # per-agent (overrides + private skills). SkillsLoader
+            # dedupes by filename with first-write-wins, so agents can
+            # shadow a daemon skill by dropping a same-named file in
+            # their own .claude/skills/.
+            skills_dirs = [
+                s for s in [
+                    self.daemon_cfg.skills_dir,
+                    str(Path(claude_path) / "skills"),
+                ] if s
+            ]
             puffo = PuffoAgent(
-                provider=provider,
+                adapter=self._adapter,
                 profile_path=profile_path,
                 memory_dir=memory_path,
-                skills_dir=skills_dir,
+                skills_dirs=skills_dirs,
+                workspace_dir=workspace_path,
+                claude_dir=claude_path,
+                agent_id=agent_id,
             )
             client = MattermostClient(
                 url=self.agent_cfg.mattermost.url,
                 token=self.agent_cfg.mattermost.bot_token,
                 profile_name=Path(profile_path).stem,
                 file_server_url="",
+                agent_id=agent_id,
             )
             client.set_rpc_handler(FileBrowser(str(agent_dir(agent_id))))
         except Exception as e:
@@ -126,8 +212,7 @@ class Worker:
         async def on_message(channel_id, channel_name, sender, sender_email, text, root_id, direct):
             typing_task = asyncio.ensure_future(_keep_typing(client, channel_id, root_id))
             try:
-                reply = await asyncio.to_thread(
-                    puffo.handle_message,
+                reply = await puffo.handle_message(
                     channel_id, channel_name, sender, sender_email, text, direct,
                 )
             except Exception as exc:
@@ -140,7 +225,6 @@ class Worker:
             if reply:
                 await client.post_message(channel_id, reply, root_id=root_id)
 
-        # runtime.json heartbeat (purely for the CLI)
         async def heartbeat():
             interval = max(1.0, self.daemon_cfg.runtime_heartbeat_seconds)
             while not self._stop.is_set():
@@ -166,7 +250,6 @@ class Worker:
                     self.runtime.save(agent_id)
                 if self._stop.is_set():
                     break
-                # Backoff between reconnect attempts.
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=RECONNECT_BACKOFF_SECONDS)
                 except asyncio.TimeoutError:
@@ -189,3 +272,21 @@ async def _keep_typing(client: MattermostClient, channel_id: str, parent_id: str
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
+
+
+_CLAUDE_DIR_SUBDIRS = ("agents", "commands", "skills", "hooks")
+
+
+def _seed_claude_dir(claude_dir: Path) -> None:
+    """Create the Claude Code convention skeleton inside a per-agent
+    ``.claude/`` dir on worker startup. Idempotent — existing files
+    are never overwritten, so users can customise freely.
+
+    The skeleton mirrors Claude Code's project-level layout
+    (``agents/``, ``commands/``, ``skills/``, ``hooks/`` as empty
+    directories) so all three tool-running adapters (sdk, cli-local,
+    cli-docker) find the same structure via their native discovery.
+    """
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    for sub in _CLAUDE_DIR_SUBDIRS:
+        (claude_dir / sub).mkdir(exist_ok=True)
