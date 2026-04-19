@@ -20,7 +20,7 @@ Everything runs on *your* machine: the daemon, the LLM calls, and any tool execu
 ### 1. Install the daemon
 
 ```bash
-pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.3.1-py3-none-any.whl
+pip install --user https://github.com/puffo-ai/puffoagent/releases/latest/download/puffoagent-0.4.0-py3-none-any.whl
 ```
 
 On Windows, pip installs `puffoagent.exe` under `%APPDATA%\Python\Python311\Scripts\`. If that directory isn't on your PATH, either add it once via `[Environment]::SetEnvironmentVariable(...)` or invoke the binary by its full path.
@@ -161,17 +161,37 @@ Allowlist pattern syntax:
 
 #### 🔹 `cli-local` — Claude Code CLI on your host
 
-Spawn a long-lived `claude --dangerously-skip-permissions` subprocess on your host machine, pipe each Mattermost message in, pipe the reply out. The subprocess stays alive across turns; Claude Code's native session mechanics carry conversation state.
+Spawn a long-lived `claude` subprocess on your host machine, pipe each Mattermost message in, pipe the reply out. The subprocess stays alive across turns; Claude Code's native session mechanics carry conversation state.
 
-- **How:** one `claude` process per agent, spawned with stream-json I/O. First turn reads the init event for a session id which is persisted to `cli_session.json`. A daemon restart or a subprocess crash re-spawns with `--resume <session_id>` so the conversation picks up seamlessly.
+- **How:** one `claude` process per agent, spawned with stream-json I/O and `--permission-mode <mode>`. First turn reads the init event for a session id which is persisted to `cli_session.json`. A daemon restart or a subprocess crash re-spawns with `--resume <session_id>` so the conversation picks up seamlessly.
 - **Auth:** Claude Code CLI OAuth — **no `ANTHROPIC_API_KEY` used or needed**, billed via your Claude Code subscription. On first use of each cli-local agent, puffoagent seeds `~/.puffoagent/agents/<id>/.claude/` from your host `~/.claude/` (credentials + settings, no history/caches) and points the agent's claude subprocess at that virtual `$HOME`. From then on sessions, history, and token refreshes stay per-agent. Re-running `claude login` on the host updates credentials for *new* agents only.
-- **Safety model:** 🚨 **None.** `--dangerously-skip-permissions` means the agent can do anything you can do: read any file, run any command, hit any network endpoint. A loud `WARNING` fires in the daemon log on first turn to make sure you saw this.
-- **Use only for:** trusted bots on trusted machines. Pick `cli-docker` instead if you want isolation.
+- **Safety model:** the **permission mode** (see below). Defaults route every non-read tool through a permission-prompt proxy that DMs you in Mattermost — you reply `y` / `n` and the answer flows back to the agent.
 - **Install:**
   ```bash
   npm install -g @anthropic-ai/claude-code
   claude login         # opens a browser; stores ~/.claude/.credentials.json
   ```
+
+##### Permission modes
+
+The `permission_mode` field on a `cli-local` agent's runtime block tells Claude Code how to gate non-read tool calls. Set it once and forget it:
+
+```bash
+puffoagent agent runtime <agent-id> --kind cli-local --permission-mode default
+```
+
+| Mode | What it does | When to use |
+|---|---|---|
+| `default` | All non-read tools (Bash, Edit, Write, MultiEdit, NotebookEdit, WebFetch, WebSearch) are intercepted by puffoagent's permission proxy. You get a DM in Mattermost like *"@han.dev — han-docker wants to run `Bash(rm -rf node_modules)`. Reply `y` to allow, `n` to deny."* The agent blocks until you answer (timeout via `--permission-timeout`, default 300 s). | **Recommended** for most cli-local agents. You stay in the loop for every action with side effects, with no friction for read-only work. |
+| `acceptEdits` | Edit / Write / MultiEdit / NotebookEdit auto-approve. Bash, WebFetch, WebSearch still go through the proxy. | When the agent's main job is editing files in its workspace and DMing you per-edit is overkill, but you still want to gate shell + network. |
+| `auto` | Claude Code's "auto-approve everything in safe contexts" heuristic. Behaves close to `acceptEdits` for most tools but is set by Claude Code, not us — semantics may shift across CLI versions. | When you want Claude Code's own judgement rather than a static rule. |
+| `dontAsk` | Suppresses the permission prompt entirely on the Claude Code side. Tools run with no proxy interception. | Throwaway agents in a sandbox where prompting would be noise. Equivalent risk to `bypassPermissions`. |
+| `bypassPermissions` | `--dangerously-skip-permissions` under the hood. Every tool runs immediately with the daemon's full host permissions — read any file, run any command, hit any URL. **No DM, no audit gate.** | Trusted bots on machines you fully control. Pick `cli-docker` instead if you want isolation rather than blind trust. |
+
+Two operator-side knobs that complement the modes:
+
+- `--owner-username` / `daemon.yml: server.operator_username` — who the proxy DMs. Captured automatically at `puffoagent login`; rarely needs manual override.
+- `--permission-timeout <seconds>` (passed to the puffo MCP server) — how long the agent waits for your `y` / `n` before assuming **deny**. Default 300 s.
 
 #### 🔹 `cli-docker` — Claude Code CLI inside a per-agent Docker container
 
