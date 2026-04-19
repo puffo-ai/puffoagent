@@ -364,6 +364,7 @@ class Worker:
                     sender_is_bot=sender_is_bot,
                     mentions=mentions,
                     post_id=post_id,
+                    root_id=root_id,
                     create_at=create_at,
                     followups=followups,
                 )

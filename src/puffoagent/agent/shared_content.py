@@ -39,6 +39,10 @@ Every user message is wrapped in a metadata block:
 
 ```
 - channel: <channel name>
+- channel_id: <26-char id>     # pass as send_message(channel=...)
+- post_id: <id of THIS message>
+- thread_root_id: <id>         # pass as send_message(root_id=...)
+- timestamp: <ISO-8601>
 - sender: <username> (<email>)
 - sender_type: human | bot
 - mentions:                    # only present when the message
@@ -53,6 +57,13 @@ Every user message is wrapped in a metadata block:
 Reply only to the `message:` field's content. Never echo the metadata
 block, field labels (`message:`), or bracketed prefixes (`[#channel]`)
 in your response. Address users with `@username` inline when needed.
+
+To **reply in the same thread**, pass `thread_root_id` as
+`send_message`'s `root_id` argument. It's pre-resolved to the actual
+top-level post (Mattermost rejects replying to an intermediate reply
+or to a post in a different channel — using `thread_root_id` avoids
+both classes of error). To **start a new top-level message** instead,
+omit `root_id`.
 
 Use `sender_type` and `mentions` to decide whether to reply:
 - If `sender_type: bot`, you may be in a bot-to-bot loop — be

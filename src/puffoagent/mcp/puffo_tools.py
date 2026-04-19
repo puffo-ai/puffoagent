@@ -212,6 +212,47 @@ async def _get_me(session: aiohttp.ClientSession, cfg: ToolsConfig) -> dict:
     return await _get(session, cfg.url, "/api/v4/users/me")
 
 
+async def _resolve_root_id(
+    session: aiohttp.ClientSession,
+    cfg: ToolsConfig,
+    root_id: str,
+    target_channel_id: str,
+) -> tuple[str, str]:
+    """Validate + normalise a caller-supplied root_id before POSTing.
+
+    Mattermost rejects ``root_id`` if (a) the post is in a different
+    channel than the new post or (b) the post is itself a reply (it
+    requires the *thread root*, not an intermediate reply). Both come
+    back as the same opaque ``Invalid RootId parameter`` 400 — the
+    agent has no way to tell what's wrong from the error alone, so
+    we fix it client-side.
+
+    Returns ``(resolved_root_id, note)``:
+    - ``resolved_root_id`` is the post id to actually pass to MM
+      (the thread root, possibly different from the input).
+    - Empty string means "drop root_id and post as a new top-level
+      message" — happens when the input post is in a different
+      channel or doesn't exist. The ``note`` is appended to the
+      tool's success string so the agent knows we silently ignored
+      its root_id rather than honoring it.
+    """
+    try:
+        post = await _get(session, cfg.url, f"/api/v4/posts/{root_id}")
+    except Exception:
+        return "", f" (note: root_id {root_id[:10]}... not found, posted as new message)"
+    if post.get("channel_id") != target_channel_id:
+        return "", (
+            f" (note: root_id {root_id[:10]}... is in a different channel, "
+            f"posted as new message)"
+        )
+    parent_root = post.get("root_id") or ""
+    if parent_root:
+        # Walk one hop to the actual root. MM only allows two-level
+        # threads (root → replies), so one hop is enough.
+        return parent_root, f" (note: rerooted to {parent_root[:10]}...)"
+    return root_id, ""
+
+
 # ── File upload ───────────────────────────────────────────────────────────────
 
 
@@ -413,10 +454,15 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             me = await _me(session)
             channel_id = await _resolve_channel(session, cfg, me["id"], channel)
             payload: dict[str, Any] = {"channel_id": channel_id, "message": text}
+            note = ""
             if root_id:
-                payload["root_id"] = root_id
+                resolved, note = await _resolve_root_id(
+                    session, cfg, root_id, channel_id,
+                )
+                if resolved:
+                    payload["root_id"] = resolved
             post = await _post(session, cfg.url, "/api/v4/posts", payload)
-            return f"posted {post.get('id', '?')} to {channel}"
+            return f"posted {post.get('id', '?')} to {channel}{note}"
 
     @mcp.tool()
     async def upload_file(path: str, channel: str, caption: str = "") -> str:

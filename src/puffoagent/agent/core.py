@@ -74,11 +74,14 @@ class PuffoAgent:
         mentions: list[dict] | None = None,
         on_progress=None,
         post_id: str = "",
+        root_id: str = "",
         create_at: int = 0,
         followups: list[dict] | None = None,
     ) -> str | None:
         self._append_user(
             channel_name, sender, sender_email, text,
+            channel_id=channel_id,
+            root_id=root_id,
             attachments=attachments,
             sender_is_bot=sender_is_bot,
             mentions=mentions,
@@ -111,6 +114,8 @@ class PuffoAgent:
         sender_email: str,
         text: str,
         attachments: list[str] | None,
+        channel_id: str = "",
+        root_id: str = "",
         sender_is_bot: bool = False,
         mentions: list[dict] | None = None,
         post_id: str = "",
@@ -125,8 +130,17 @@ class PuffoAgent:
         lines = [
             "- channel: " + channel_name,
         ]
+        if channel_id:
+            lines.append(f"- channel_id: {channel_id}")
         if post_id:
             lines.append(f"- post_id: {post_id}")
+        # thread_root_id is the post id to pass as send_message's root_id
+        # when replying in this thread. For a top-level post the root is
+        # the post itself, so we surface post_id either way — the agent
+        # never has to think about which to use.
+        thread_root = root_id or post_id
+        if thread_root:
+            lines.append(f"- thread_root_id: {thread_root}")
         ts_iso = _ms_to_iso(create_at)
         if ts_iso:
             lines.append(f"- timestamp: {ts_iso}")
