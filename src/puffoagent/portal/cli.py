@@ -75,6 +75,125 @@ exactly `[SILENT]` to stay silent.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Version + update helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where we ask "what's the latest released version?". GitHub Releases
+# is the source of truth for end users (PyPI lags behind the repo
+# tags during a release window). Switched here so we don't have to
+# fetch + parse PyPI JSON, which is rate-limited per IP.
+GITHUB_RELEASES_LATEST_URL = (
+    "https://api.github.com/repos/puffo-ai/puffoagent/releases/latest"
+)
+
+
+def get_local_version() -> str:
+    """Return the installed puffoagent version, or "unknown" if the
+    package metadata can't be located (e.g. running from a checkout
+    without `pip install`).
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("puffoagent")
+    except (ImportError, Exception):
+        return "unknown"
+
+
+def is_source_install() -> bool:
+    """True when puffoagent was installed from a local path or VCS
+    rather than from PyPI. Detected via PEP 610's
+    ``direct_url.json``, which pip drops next to the dist-info for
+    any non-PyPI install (`pip install /path/to/dir`,
+    `pip install -e .`, `pip install git+https://...`).
+
+    The startup version-check skips outdated warnings for source
+    installs so a developer working off a feature branch isn't
+    spammed with "you're behind main" when they're ahead of main.
+    """
+    try:
+        from importlib.metadata import files
+
+        for f in files("puffoagent") or []:
+            if f.name == "direct_url.json":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def fetch_latest_release_tag(timeout: float = 5.0) -> str | None:
+    """GET the latest release tag from GitHub. Returns None on any
+    failure (offline, rate-limited, GitHub outage, malformed body) so
+    the caller can fail-soft. Stripped of a leading ``v`` so tags
+    like ``v0.4.0`` compare cleanly against the installed
+    ``0.4.0``.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        GITHUB_RELEASES_LATEST_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "puffoagent-cli",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        tag = (data.get("tag_name") or "").strip()
+        return tag.lstrip("v") or None
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            TimeoutError, ValueError, OSError):
+        return None
+
+
+def is_outdated(local: str, remote: str) -> bool:
+    """``remote > local`` for simple dotted versions like ``0.3.1``.
+    Tolerates trailing pre-release suffixes (``0.4.0rc1`` → 0.4.0)
+    by parsing only the leading digits of each segment. Falls back
+    to False on anything we can't parse — better to under-warn
+    than to warn on noise.
+    """
+    def parse(v: str) -> tuple[int, ...]:
+        out: list[int] = []
+        for part in v.split("."):
+            digits = ""
+            for ch in part:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            out.append(int(digits) if digits else 0)
+        return tuple(out)
+
+    if local in ("", "unknown") or not remote:
+        return False
+    try:
+        return parse(remote) > parse(local)
+    except Exception:
+        return False
+
+
+def upgrade_command_for_install_mode() -> str:
+    """Return the shell command a user should run to upgrade their
+    install. Source installs need the local path; PyPI installs use
+    the package name. We can't always tell exactly *which* source
+    path they used, so for source installs we recommend re-running
+    pip with the same path they originally cloned to (we point
+    them at the standard public repo URL as a hint).
+    """
+    if is_source_install():
+        return (
+            "pip install --upgrade --user "
+            "git+https://github.com/puffo-ai/puffoagent.git"
+        )
+    return "pip install --upgrade puffoagent"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # init / start / status
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -127,28 +246,49 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    """Store a Puffo server URL + user token for server-synced mode."""
+    """Connect this machine to a Puffo.ai server.
+
+    Two modes:
+      - Manual:  ``--url <X> --token <Y>`` — caller already has a
+                 personal access token (legacy / scripted install).
+      - Pairing: just ``--url <X>`` (or no args, in which case we
+                 prompt for the URL) — start an OAuth-style device
+                 flow. Server returns a short user_code; the user
+                 enters it at <url>/cli/connect in any browser
+                 they're already logged into. CLI polls until the
+                 user authorizes, then receives + saves a token
+                 issued for THIS machine.
+    """
     home_dir().mkdir(parents=True, exist_ok=True)
     cfg = DaemonConfig.load()
-    url = args.url or ""
+    url = (args.url or "").rstrip("/")
     token = args.token or ""
+
+    # Token explicitly provided → manual path (no device pairing).
+    if token:
+        if not url:
+            url = input("Puffo server URL [http://localhost:8065]: ").strip().rstrip("/") or "http://localhost:8065"
+        return _login_with_token(cfg, url, token)
+
     if not url:
-        url = input("Puffo server URL [http://localhost:8065]: ").strip() or "http://localhost:8065"
-    if not token:
-        token = input("User personal access token: ").strip()
-    if not token:
-        print("error: user token is required", file=sys.stderr)
-        return 2
-    # Sanity check with a GET /users/me.
-    import urllib.request
+        url = input("Puffo server URL [http://localhost:8065]: ").strip().rstrip("/") or "http://localhost:8065"
+    return _login_via_device_pairing(cfg, url)
+
+
+def _login_with_token(cfg: DaemonConfig, url: str, token: str) -> int:
+    """Legacy manual-token login. Verifies the token by hitting
+    /users/me and saves on success.
+    """
+    import json as _json
     import urllib.error
+    import urllib.request
+
     req = urllib.request.Request(
-        url.rstrip("/") + "/api/v4/users/me",
+        url + "/api/v4/users/me",
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            import json as _json
             me = _json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         print(f"error: server rejected token ({exc.code} {exc.reason})", file=sys.stderr)
@@ -156,12 +296,189 @@ def cmd_login(args: argparse.Namespace) -> int:
     except (urllib.error.URLError, TimeoutError) as exc:
         print(f"error: cannot reach {url}: {exc}", file=sys.stderr)
         return 2
-    cfg.server.url = url.rstrip("/")
+    cfg.server.url = url
     cfg.server.user_token = token
+    cfg.server.device_id = ""  # legacy login isn't device-bound
+    cfg.server.operator_username = me.get("username", "") or ""
     cfg.save()
     print(f"logged in as @{me.get('username', '?')} ({me.get('email', '?')})")
     print(f"server sync will run on next `puffoagent start`.")
     return 0
+
+
+def _login_via_device_pairing(cfg: DaemonConfig, url: str) -> int:
+    """Run the OAuth-style device-code flow. Steps:
+
+      1. POST /cli/devices/pair/start with this machine's hostname.
+         Server returns device_code (kept secret) + user_code (shown
+         to the user) + verification_url + ttl + poll interval.
+      2. Print the user_code + URL. User opens URL in any browser
+         they're already authenticated to and clicks Authorize.
+      3. Poll /cli/devices/pair/poll every Interval seconds until
+         the response status is 'authorized' (we got the token),
+         'denied', or 'expired'.
+      4. On success, save the issued access_token + device_id to
+         daemon.yml.
+    """
+    import json as _json
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    device_name = socket.gethostname() or "unknown-host"
+
+    # Step 1: start.
+    # Verbose tracing is opt-in via env var so the diagnostic output
+    # doesn't clutter normal runs. Set PUFFOAGENT_LOGIN_DEBUG=1 to
+    # see the full request/response roundtrip.
+    debug = os.environ.get("PUFFOAGENT_LOGIN_DEBUG") == "1"
+
+    def _trace(msg: str) -> None:
+        if debug:
+            print(f"[debug] {msg}", file=sys.stderr, flush=True)
+
+    start_url = url + "/api/v4/cli/devices/pair/start"
+    start_body = _json.dumps({"device_name": device_name}).encode("utf-8")
+    _trace(f"POST {start_url} body={start_body.decode('utf-8')}")
+    start_req = urllib.request.Request(
+        start_url,
+        data=start_body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(start_req, timeout=10) as resp:
+            start_raw = resp.read().decode("utf-8")
+            _trace(f"pair/start response: {start_raw}")
+            start = _json.loads(start_raw)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+        print(f"error: pair start failed ({exc.code}): {body}", file=sys.stderr)
+        return 2
+    except (urllib.error.URLError, TimeoutError) as exc:
+        print(f"error: cannot reach {url}: {exc}", file=sys.stderr)
+        return 2
+
+    device_code = start.get("device_code", "")
+    user_code = start.get("user_code", "")
+    verification_url_base = start.get("verification_url", url + "/cli/connect")
+    expires_in = int(start.get("expires_in", 120))
+    interval = max(1, int(start.get("interval", 2)))
+    _trace(f"device_code len={len(device_code)} head={device_code[:12]}... tail=...{device_code[-12:]}")
+    _trace(f"user_code={user_code!r}")
+    _trace(f"verification_url_base={verification_url_base!r}")
+
+    if not device_code or not user_code:
+        print("error: server returned an incomplete pairing response", file=sys.stderr)
+        return 2
+
+    # Pre-fill the code in the URL so the operator just clicks
+    # Authorize instead of copy-pasting. ``?code=`` is read by the
+    # /cli/connect webapp page.
+    sep = "&" if "?" in verification_url_base else "?"
+    verification_url = f"{verification_url_base}{sep}code={user_code}"
+
+    # Step 2: ask the human. Try to open the page automatically —
+    # most desktops have a default browser and this removes the
+    # "oh I have to click a URL" step. Fall back silently: print
+    # the URL either way so SSH / headless sessions still work.
+    import webbrowser
+    browser_opened = False
+    try:
+        browser_opened = webbrowser.open(verification_url, new=2)
+    except Exception:
+        browser_opened = False
+
+    print()
+    if browser_opened:
+        print("Opened in your browser (if it didn't appear, the URL is below).")
+    else:
+        print("Could not open a browser automatically — open this URL:")
+    print(f"  {verification_url}")
+    print()
+    print(f"Code:  {user_code}")
+    print()
+    print(f"Waiting for authorization (expires in {expires_in}s)...", flush=True)
+
+    # Step 3: poll.
+    poll_url = url + "/api/v4/cli/devices/pair/poll"
+    deadline = time.time() + expires_in
+    poll_body = _json.dumps({"device_code": device_code}).encode("utf-8")
+    _trace(f"poll URL: {poll_url}")
+    _trace(f"poll body: {poll_body.decode('utf-8')}")
+    while time.time() < deadline:
+        time.sleep(interval)
+        poll_req = urllib.request.Request(
+            poll_url,
+            data=poll_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=10) as resp:
+                poll_raw = resp.read().decode("utf-8")
+                _trace(f"poll response: {poll_raw}")
+                poll = _json.loads(poll_raw)
+        except urllib.error.HTTPError as exc:
+            # 404 means the pairing got cleaned up — treat as expired.
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+            print(f"error: poll failed ({exc.code}): {err_body}", file=sys.stderr)
+            return 2
+        except (urllib.error.URLError, TimeoutError) as exc:
+            # Transient — keep polling. The deadline check bounds total time.
+            print(f"warning: poll error: {exc}; retrying...", file=sys.stderr)
+            continue
+
+        status = poll.get("status", "")
+        if status == "authorized":
+            access_token = poll.get("access_token", "")
+            device_id = poll.get("device_id", "")
+            server_url = poll.get("server_url", url).rstrip("/")
+            if not access_token:
+                print("error: server returned authorized but no access_token", file=sys.stderr)
+                return 2
+            # Resolve the operator's username with the fresh token so
+            # the cli-local permission proxy has a DM target for tool-
+            # approval prompts. Soft-fail — if this /users/me call hits
+            # a network blip, we still save the login and let the user
+            # re-login later rather than failing the whole pairing.
+            operator_username = ""
+            try:
+                me_req = urllib.request.Request(
+                    server_url + "/api/v4/users/me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                with urllib.request.urlopen(me_req, timeout=10) as me_resp:
+                    me = _json.loads(me_resp.read().decode("utf-8"))
+                operator_username = me.get("username", "") or ""
+            except (urllib.error.HTTPError, urllib.error.URLError,
+                    TimeoutError, ValueError) as exc:
+                print(
+                    f"warning: paired OK but could not resolve operator username: {exc}",
+                    file=sys.stderr,
+                )
+            cfg.server.url = server_url
+            cfg.server.user_token = access_token
+            cfg.server.device_id = device_id
+            cfg.server.operator_username = operator_username
+            cfg.save()
+            print()
+            print(f"paired this machine ({device_name}) — device_id={device_id}")
+            if operator_username:
+                print(f"operator:              @{operator_username}")
+            print(f"server sync will run on next `puffoagent start`.")
+            return 0
+        if status == "denied":
+            print("error: pairing denied by user", file=sys.stderr)
+            return 2
+        if status == "expired":
+            print("error: pairing expired before authorization. re-run `puffoagent login`.", file=sys.stderr)
+            return 2
+        # Otherwise status == "pending" — keep polling.
+
+    print("error: pairing timed out before authorization. re-run `puffoagent login`.", file=sys.stderr)
+    return 2
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
@@ -182,6 +499,48 @@ def cmd_start(args: argparse.Namespace) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     return asyncio.run(run_daemon())
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    """Print the installed puffoagent version and where it came
+    from. Cheap, offline, idempotent — useful first command when
+    debugging "why doesn't feature X work" reports.
+    """
+    local = get_local_version()
+    src = "source install" if is_source_install() else "release install"
+    print(f"puffoagent {local}  ({src})")
+    return 0
+
+
+def cmd_check_update(args: argparse.Namespace) -> int:
+    """Compare the installed version against the latest GitHub
+    release and print the upgrade command (if outdated) or a
+    "you're current" line (if not). Never executes the upgrade
+    itself — on Windows the running daemon holds a lock on
+    ``puffoagent.exe``, and source vs PyPI installs need different
+    pip invocations, so the user is the right party to run it.
+    """
+    local = get_local_version()
+    src = "source install" if is_source_install() else "release install"
+    print(f"installed: puffoagent {local}  ({src})")
+    remote = fetch_latest_release_tag()
+    if remote is None:
+        print("latest:    (could not reach github.com — check your network)")
+        return 0
+    print(f"latest:    {remote}")
+    if is_outdated(local, remote):
+        print()
+        print("an update is available. to upgrade:")
+        print(f"  {upgrade_command_for_install_mode()}")
+        if is_source_install():
+            print("  (or re-run pip install against your local clone)")
+        print()
+        print("note: if the daemon is currently running, stop it first —")
+        print("on windows the puffoagent.exe file is locked while in use.")
+        return 0
+    print()
+    print("you're up to date.")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -606,17 +965,21 @@ def cmd_agent_runtime(args: argparse.Namespace) -> int:
             [] if not raw else [t.strip() for t in raw.split(",") if t.strip()]
         )
         touched = True
+    if args.permission_mode is not None:
+        cfg.runtime.permission_mode = args.permission_mode
+        touched = True
 
     if not touched:
         # No flags → just print. Matches `agent show`'s runtime lines.
         print(f"id:              {cfg.id}")
         print("runtime:")
-        print(f"  kind:          {cfg.runtime.kind}")
-        print(f"  provider:      {cfg.runtime.provider or '(default)'}")
-        print(f"  model:         {cfg.runtime.model or '(default)'}")
-        print(f"  api_key:       {'(set)' if cfg.runtime.api_key else '(inherit)'}")
-        print(f"  allowed_tools: {cfg.runtime.allowed_tools or '[]'}")
-        print(f"  docker_image:  {cfg.runtime.docker_image or '(bundled default)'}")
+        print(f"  kind:             {cfg.runtime.kind}")
+        print(f"  provider:         {cfg.runtime.provider or '(default)'}")
+        print(f"  model:            {cfg.runtime.model or '(default)'}")
+        print(f"  api_key:          {'(set)' if cfg.runtime.api_key else '(inherit)'}")
+        print(f"  allowed_tools:    {cfg.runtime.allowed_tools or '[]'}")
+        print(f"  docker_image:     {cfg.runtime.docker_image or '(bundled default)'}")
+        print(f"  permission_mode:  {cfg.runtime.permission_mode}  (cli-local only)")
         return 0
 
     cfg.save()
@@ -730,6 +1093,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="Set up ~/.puffoagent/daemon.yml interactively").set_defaults(func=cmd_init)
     sub.add_parser("start", help="Run the daemon in the foreground").set_defaults(func=cmd_start)
     sub.add_parser("status", help="Show daemon + agent status").set_defaults(func=cmd_status)
+    sub.add_parser("version", help="Print installed puffoagent version").set_defaults(func=cmd_version)
+    sub.add_parser(
+        "check-update",
+        help="Compare installed version against latest GitHub release",
+    ).set_defaults(func=cmd_check_update)
 
     login = sub.add_parser("login", help="Store a Puffo server URL + user token for server-synced mode")
     login.add_argument("--url", help="Puffo server URL")
@@ -795,6 +1163,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="SDK: comma-separated tool allowlist patterns, e.g. Read,Edit,\"Bash(git *)\" — empty clears",
     )
     runtime.add_argument("--docker-image", help="cli-docker: override image tag")
+    runtime.add_argument(
+        "--permission-mode",
+        choices=["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions"],
+        help=(
+            "cli-local: Claude Code permission mode. 'default' routes all "
+            "non-read tools through the MCP permission proxy (recommended). "
+            "See https://code.claude.com/docs/en/permission-modes."
+        ),
+    )
     runtime.set_defaults(func=cmd_agent_runtime)
 
     archive = agent_sub.add_parser("archive", help="Stop and archive an agent to ~/.puffoagent/archived/")

@@ -41,6 +41,14 @@ class Daemon:
         logger.info("puffoagent portal starting; home=%s", home_dir())
         interval = max(0.5, self.daemon_cfg.reconcile_interval_seconds)
 
+        # Fire a one-shot version check so the operator sees an
+        # actionable warning at startup if their daemon is older than
+        # the latest GitHub release. Runs in a worker thread (urllib
+        # is blocking) and never blocks startup. Skipped silently
+        # for source installs — `pip install -e .` users are
+        # almost always *ahead* of the latest tag.
+        asyncio.ensure_future(_log_outdated_version_warning())
+
         # The server-sync loop (server → filesystem) and the local
         # reconciler (filesystem → workers) run in parallel. Both stop
         # when ``self._stop`` is set.
@@ -118,6 +126,43 @@ class Daemon:
     async def _stop_all_workers(self) -> None:
         ids = list(self.workers.keys())
         await asyncio.gather(*(self._stop_worker(i) for i in ids), return_exceptions=True)
+
+
+async def _log_outdated_version_warning() -> None:
+    """Background task: compare local puffoagent version against the
+    latest GitHub release and log a WARNING if behind. Best-effort —
+    network errors / missing metadata silently skip the check.
+    """
+    # Lazy import to avoid the cli ↔ daemon module cycle at load time.
+    from .cli import (
+        fetch_latest_release_tag,
+        get_local_version,
+        is_outdated,
+        is_source_install,
+        upgrade_command_for_install_mode,
+    )
+    if is_source_install():
+        # Source / editable installs may legitimately be ahead of
+        # the latest release; warning them is noise.
+        return
+    try:
+        local = get_local_version()
+        remote = await asyncio.to_thread(fetch_latest_release_tag)
+    except Exception:
+        return
+    if not remote:
+        return
+    if is_outdated(local, remote):
+        logger.warning(
+            "puffoagent %s is behind the latest release (%s). "
+            "this daemon may be missing features or fixes documented "
+            "on github. to upgrade: %s",
+            local, remote, upgrade_command_for_install_mode(),
+        )
+    else:
+        logger.info(
+            "puffoagent %s (latest release: %s)", local, remote,
+        )
 
 
 def _worker_needs_restart(old, new) -> bool:

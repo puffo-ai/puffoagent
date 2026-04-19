@@ -183,6 +183,17 @@ class ServerConfig:
     url: str = ""
     user_token: str = ""
     sync_interval_seconds: float = 30.0
+    # Server-issued device id, set when the user paired this machine
+    # via `puffoagent login` (no args). Empty for legacy installs that
+    # used --url + --token directly. The server's sync filter uses
+    # this to scope agents to the device hosting them.
+    device_id: str = ""
+    # Username of the daemon operator (the human who ran `puffoagent
+    # login`). Captured from GET /users/me after auth. Used as the DM
+    # target for the cli-local permission proxy — by design, tool-
+    # approval prompts go to the operator of this daemon, regardless
+    # of which user actually created the agent.
+    operator_username: str = ""
 
 
 @dataclass
@@ -223,6 +234,8 @@ class DaemonConfig:
             url=srv.get("url", ""),
             user_token=srv.get("user_token", ""),
             sync_interval_seconds=float(srv.get("sync_interval_seconds", 30.0)),
+            device_id=srv.get("device_id", ""),
+            operator_username=srv.get("operator_username", ""),
         )
         return cfg
 
@@ -275,6 +288,12 @@ class RuntimeConfig:
     # cli-docker: override the default image tag. Empty → the bundled
     # image that puffoagent builds from its inline Dockerfile.
     docker_image: str = ""
+    # cli-local: Claude Code permission mode. See
+    # https://code.claude.com/docs/en/permission-modes for what each
+    # value auto-approves. ``default`` (claude's built-in) auto-
+    # approves reads and routes everything else through our
+    # permission-prompt-tool proxy — most agents should use this.
+    permission_mode: str = "default"
 
 
 @dataclass
@@ -324,6 +343,7 @@ class AgentConfig:
                 api_key=rt.get("api_key", ""),
                 allowed_tools=list(rt.get("allowed_tools") or []),
                 docker_image=rt.get("docker_image", ""),
+                permission_mode=rt.get("permission_mode", "default"),
             ),
             profile=raw.get("profile", "profile.md"),
             memory_dir=raw.get("memory_dir", "memory"),

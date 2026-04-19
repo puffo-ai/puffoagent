@@ -12,12 +12,44 @@ See ``DESIGN.md`` at the repo root for the full responsibility split.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 
+logger = logging.getLogger(__name__)
+
+
 ProgressCallback = Callable[[str], Awaitable[None]]
+
+
+# Refresh when the access token has fewer than this many seconds
+# remaining. Token TTL varies by plan (Pro ~1h, Max ~8h), so we
+# key off the absolute ``expiresAt`` field in .credentials.json
+# rather than a mtime-based heuristic. 15 min gives enough margin
+# to survive one retry before the token actually dies.
+CREDENTIAL_REFRESH_BEFORE_EXPIRY_SECONDS = 15 * 60
+
+
+# Daemon-wide mutex across every Adapter instance. OAuth uses
+# rotating refresh tokens — each refresh invalidates the previous
+# refresh_token, so two agents that both call the refresh endpoint
+# at the same time will see one win and the other get
+# ``invalid_grant``. With the shared-credentials bind-mount
+# (cli-docker) or per-agent copies seeded from the host (cli-
+# local), the race is real any time more than one agent ticks past
+# the expiry threshold in the same moment.
+#
+# Policy: the first agent to grab the lock does the refresh. Late
+# arrivals find the lock held and SKIP entirely (not queue) —
+# their next tick will see the freshly-refreshed file and skip
+# naturally.
+#
+# asyncio.Lock is safe to construct at module-load time in Python
+# 3.10+ (no loop binding).
+_REFRESH_LOCK = asyncio.Lock()
 
 
 @dataclass
@@ -86,13 +118,108 @@ class Adapter(ABC):
 
     async def refresh_ping(self) -> None:
         """Force an auth round-trip so Anthropic's rotating OAuth
-        refresh token gets exchanged before it expires. The worker
-        calls this periodically on idle agents.
+        refresh token gets exchanged before the access token dies.
+        The worker calls this periodically on every agent.
 
-        CLI adapters override this to run a silent no-op turn — the
-        claude subprocess handles the refresh internally as part of
-        any API call. SDK / chat-only use static API keys and don't
-        need it; default no-op here is correct for them.
+        Structured as an orchestrator around two subclass hooks:
+          - ``_credentials_expires_in_seconds()`` — how long until
+            the current access token expires?
+          - ``_run_refresh_oneshot()`` — actually do the refresh
+
+        Guarded by a daemon-wide mutex (``_REFRESH_LOCK``) so N
+        agents that all tick past the expiry threshold at once
+        don't dogpile the refresh endpoint — only the first to
+        arrive runs a refresh; the others skip (no-op, not queue).
+        Their next tick sees a fresh file and skips naturally.
+
+        SDK / chat-only adapters use static API keys and inherit
+        the default ``_credentials_expires_in_seconds`` of
+        ``None`` which short-circuits the orchestrator.
+        """
+        expires_in_before = self._credentials_expires_in_seconds()
+        if expires_in_before is None:
+            return
+        if expires_in_before > CREDENTIAL_REFRESH_BEFORE_EXPIRY_SECONDS:
+            logger.debug(
+                "credentials fresh (expires in %ds), skipping refresh ping",
+                expires_in_before,
+            )
+            return
+
+        # Don't queue behind an in-flight refresh. If another agent
+        # is already doing one, our file will be updated by the time
+        # we see it on the next tick.
+        if _REFRESH_LOCK.locked():
+            logger.debug(
+                "another agent is refreshing; skipping this tick "
+                "(expires in %ds; next tick will see fresh file)",
+                expires_in_before,
+            )
+            return
+
+        async with _REFRESH_LOCK:
+            # Re-check after acquiring — another agent may have
+            # finished its refresh just before we got here, in
+            # which case the file is already fresh.
+            expires_in_recheck = self._credentials_expires_in_seconds()
+            if expires_in_recheck is None:
+                logger.warning(
+                    "refresh_ping: credentials file disappeared "
+                    "between threshold check and lock acquire"
+                )
+                return
+            if expires_in_recheck > CREDENTIAL_REFRESH_BEFORE_EXPIRY_SECONDS:
+                logger.info(
+                    "credentials refreshed by another agent "
+                    "(expires in %ds); skipping", expires_in_recheck,
+                )
+                return
+
+            logger.info(
+                "credentials expire in %ds — running refresh ping",
+                expires_in_recheck,
+            )
+            try:
+                await self._run_refresh_oneshot()
+            except Exception as exc:
+                logger.warning("refresh_ping failed: %s", exc)
+                return
+
+            expires_in_after = self._credentials_expires_in_seconds()
+            if expires_in_after is None:
+                logger.warning(
+                    "refresh_ping ran but credentials file is no "
+                    "longer readable (was expiring in %ds)",
+                    expires_in_recheck,
+                )
+                return
+            logger.info(
+                "credentials refreshed: expires in %ds (was %ds)",
+                expires_in_after, expires_in_recheck,
+            )
+            if expires_in_after <= expires_in_recheck:
+                logger.warning(
+                    "refresh_ping ran but token expiry didn't advance "
+                    "— claude may not be rewriting the credentials "
+                    "file; check OAuth state"
+                )
+
+    def _credentials_expires_in_seconds(self) -> int | None:
+        """Return seconds until the OAuth access token expires (may
+        be negative if already expired), or ``None`` if this
+        adapter doesn't use OAuth (SDK / chat-only) or the file
+        can't be parsed. Subclass hook used by ``refresh_ping``.
+        """
+        return None
+
+    async def _run_refresh_oneshot(self) -> None:
+        """Spawn a short-lived claude invocation that forces an auth
+        round-trip and writes the refreshed token back to
+        ``.credentials.json``. Must NOT reuse the adapter's long-
+        lived session — the whole point is that the one-shot
+        process exits and triggers the credentials-write path.
+        Subclass hook used by ``refresh_ping``; default is a no-op
+        to keep SDK / chat-only adapters clean.
         """
         return None
 

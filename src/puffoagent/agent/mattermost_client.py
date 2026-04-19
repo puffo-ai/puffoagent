@@ -11,10 +11,18 @@ from ._logging import agent_logger
 
 _MENTION_RE = re.compile(r"@([a-zA-Z0-9._-]+)")
 
-# How often to refresh the online status (seconds)
-STATUS_HEARTBEAT_INTERVAL = 30
 # How often the puffoagent-specific heartbeat is sent to /aiagents/me/heartbeat.
+# Drives AIAgent.Status (server-side heartbeat-staleness check).
 AI_AGENT_HEARTBEAT_INTERVAL = 30
+
+# How often we push the user-level "online" status for the bot account
+# — distinct from the AIAgent heartbeat above. The webapp's presence
+# dot for users (including bots) reads from the standard Status
+# table; without this, bots appear offline even while the daemon is
+# happily running. The server's PUT /users/{id}/status handler DOES
+# set the status before its 404-prone re-read kicks in, so we
+# deliberately swallow 404s here.
+STATUS_HEARTBEAT_INTERVAL = 30
 
 # Priority tiers for the per-agent message queue. Lower number = higher
 # priority; the consumer pulls lowest first. The order matches what
@@ -142,6 +150,48 @@ class MattermostClient:
                         self.logger.warning(f"Heartbeat failed: {resp.status}")
             except Exception as e:
                 self.logger.warning(f"Heartbeat error: {e}")
+
+    async def _set_online(self, session: aiohttp.ClientSession):
+        """PUT /users/{id}/status online. The Mattermost handler
+        sets the cache/DB status BEFORE its response re-read, so
+        the status update lands even when the response itself 404s
+        (the server tries to re-fetch a just-created Status row
+        that isn't in cache yet for bot users — harmless quirk).
+        We swallow 404 at INFO level so logs stay clean.
+        """
+        if not self.bot_user_id:
+            # _get_me hasn't populated this yet; first heartbeat
+            # after listen() start runs post-me, so this is a
+            # defensive guard for edge cases only.
+            return
+        payload = {"user_id": self.bot_user_id, "status": "online"}
+        try:
+            async with session.put(
+                f"{self.url}/api/v4/users/{self.bot_user_id}/status",
+                json=payload,
+            ) as resp:
+                if resp.status in (200, 201, 404):
+                    # 404 is the known "status set, response re-read
+                    # can't find the Status row" path — cosmetic.
+                    return
+                self.logger.warning(
+                    f"Failed to set online status: {resp.status}",
+                )
+        except Exception as e:
+            self.logger.warning(f"Set-online error: {e}")
+
+    async def _status_heartbeat(self, session: aiohttp.ClientSession):
+        """Refresh the bot's user-level ``online`` status periodically
+        so the webapp's presence dot stays lit. Uses the same
+        aiohttp session as the ai_agent heartbeat — no per-call
+        session churn.
+        """
+        while True:
+            try:
+                await self._set_online(session)
+            except Exception as e:
+                self.logger.warning(f"Status heartbeat error: {e}")
+            await asyncio.sleep(STATUS_HEARTBEAT_INTERVAL)
 
     async def _fetch_followup_context(
         self,
@@ -307,23 +357,6 @@ class MattermostClient:
             # — the supervisor will reconnect on its own.
             self.logger.warning(f"RPC response send failed: {e}")
 
-    async def _set_online(self):
-        """Set bot status to online via REST API."""
-        async with aiohttp.ClientSession(headers=self.headers) as session:
-            payload = {"user_id": self.bot_user_id, "status": "online"}
-            async with session.put(f"{self.url}/api/v4/users/{self.bot_user_id}/status", json=payload) as resp:
-                if resp.status not in (200, 201):
-                    self.logger.warning(f"Failed to set online status: {resp.status}")
-
-    async def _status_heartbeat(self):
-        """Keep the bot status as online by refreshing periodically."""
-        while True:
-            try:
-                await self._set_online()
-            except Exception as e:
-                self.logger.warning(f"Status heartbeat error: {e}")
-            await asyncio.sleep(STATUS_HEARTBEAT_INTERVAL)
-
     async def send_typing(self, channel_id: str, parent_id: str = ""):
         """Send a typing indicator for this channel via WebSocket."""
         ws = self._ws
@@ -449,7 +482,10 @@ class MattermostClient:
         async with aiohttp.ClientSession(headers=self.headers) as session:
             await self._get_me(session)
             await self._register_as_ai_agent(session)
-            await self._set_online()
+            # Mark the bot user online immediately so the presence
+            # dot lights up within seconds of daemon start. The
+            # background heartbeat keeps refreshing it.
+            await self._set_online(session)
 
             # Cancel any background tasks leftover from a previous listen()
             # call (reconnect path) before spawning fresh ones bound to this
@@ -462,8 +498,8 @@ class MattermostClient:
             self._queue = asyncio.PriorityQueue()
             self._queue_seq = 0
             self._background_tasks = [
-                asyncio.ensure_future(self._status_heartbeat()),
                 asyncio.ensure_future(self._ai_agent_heartbeat_loop(session)),
+                asyncio.ensure_future(self._status_heartbeat(session)),
                 asyncio.ensure_future(self._consume_queue(on_message, session)),
             ]
 

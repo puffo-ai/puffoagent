@@ -38,6 +38,12 @@ dependencies = [
 sdk = ["claude-agent-sdk>=0.1.61"]
 # cli-local / cli-docker adapters don't need extra Python deps; they
 # shell out to the `claude` binary (cli-local) or Docker (cli-docker).
+# pip install --editable ".[dev]"  — needed to run the test suite.
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
 
 [project.urls]
 Homepage      = "https://github.com/puffo-ai/puffoagent"

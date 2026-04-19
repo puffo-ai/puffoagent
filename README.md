@@ -31,20 +31,7 @@ Verify:
 puffoagent --help
 ```
 
-### 2. Get a personal access token from Puffo.ai
-
-The daemon needs a token so it can sync agents you own from the server. To create one:
-
-1. Sign in to your Puffo.ai server (e.g. `https://app.puffo.ai`).
-2. Click your avatar in the top-right corner → **Profile**.
-3. Click the **Security** tab.
-4. Find **Personal Access Tokens** → **Create Token**.
-   - If you don't see this section, your admin hasn't enabled personal access tokens yet — ask them.
-   - Description: anything, e.g. `puffoagent on <hostname>`.
-5. Click **Yes, Create**.
-6. **Copy the Access Token string immediately.** It is only shown once.
-
-### 3. Configure the daemon
+### 2. Configure the daemon
 
 ```bash
 puffoagent init
@@ -57,6 +44,16 @@ Answer the prompts:
 
 This writes `~/.puffoagent/daemon.yml`. You can re-run `init` anytime to update keys.
 
+#### 2a. Log in to your Puffo.ai server
+
+```bash
+puffoagent login --url https://app.puffo.ai
+```
+
+Opens your browser to a one-click **Authorize this device** page on Puffo.ai. Click it and the daemon receives a token scoped to this machine — nothing to copy-paste, no personal access token to manage. Re-run `logout` + `login` any time to rotate.
+
+Have a pre-created personal access token instead? `puffoagent login --url <X> --token <Y>` still works for scripted installs.
+
 #### Which credentials do I actually need?
 
 Depends on the runtime each of your agents will use. Every agent is independent — a single daemon can host agents across different runtimes, so you only need the credentials for the ones you plan to use.
@@ -65,12 +62,12 @@ Depends on the runtime each of your agents will use. Every agent is independent 
 |---|---|---|
 | `chat-only` | An Anthropic **or** OpenAI API key. | Set in `puffoagent init`. You pay the provider directly for tokens. |
 | `sdk` | An **Anthropic API key**. | Same key slot as `chat-only`. OpenAI isn't supported on this runtime — the SDK is Anthropic-only. Also run `pip install --user --upgrade "puffoagent[sdk]"`. |
-| `cli-local` | **Claude Code CLI OAuth** — no API key. | Skip the key prompts in `init` if this is your only runtime. Set up auth by running `claude login` on the host *once* (see step 3a below). Billing is via your Claude Code subscription, not per-token. |
-| `cli-docker` | **Claude Code CLI OAuth** — no API key. | Same as `cli-local`: run `claude login` on the host once. Puffoagent copies credentials into each agent's sandboxed container on first use. |
+| `cli-local` | **Claude Code CLI OAuth** — no API key. | Skip the key prompts in `init` if this is your only runtime. Set up auth by running `claude login` on the host *once* (see step 2b below). Billing is via your Claude Code subscription, not per-token. |
+| `cli-docker` | **Claude Code CLI OAuth** — no API key. | Same as `cli-local`: run `claude login` on the host once. Anthropic's rotating refresh tokens mean each agent can't hold its own copy — they'd invalidate each other. Puffoagent bind-mounts the host's `.credentials.json` (single file) into every agent's container; everything else in `.claude/` is still per-agent. |
 
 **Tip:** If you'll use a mix of runtimes, enter your Anthropic API key in `init` *and* run `claude login` — they cover different paths and don't conflict.
 
-#### 3a. (For `cli-local` and `cli-docker` agents) Log in to Claude Code
+#### 2b. (For `cli-local` and `cli-docker` agents) Log in to Claude Code
 
 One-time host-level step. Install the CLI if you haven't already, then run the interactive login:
 
@@ -82,19 +79,14 @@ npm install -g @anthropic-ai/claude-code
 claude login
 ```
 
-On first use of each `cli-local` or `cli-docker` agent, puffoagent copies a minimal slice of `~/.claude/` (OAuth credentials + settings, no history or caches) into that agent's private virtual home at `~/.puffoagent/agents/<id>/.claude/`. From then on, every agent has its own isolated claude identity — sessions, history, and token refreshes stay per-agent. Re-running `claude login` on the host refreshes the credentials for *new* agents; existing agents keep their already-issued tokens until those expire.
+On first use of each `cli-local` or `cli-docker` agent, puffoagent seeds a minimal slice of `~/.claude/` (settings, no history or caches) into that agent's private virtual home at `~/.puffoagent/agents/<id>/.claude/`. Sessions and history stay **per-agent** — isolated from your host `claude` and from other agents. The only shared piece is OAuth:
 
-If you skip this step and try to talk to a `cli-local` / `cli-docker` agent, the first turn will fail with an auth error and the daemon log will point you here.
+- **`cli-local`:** the agent's `.credentials.json` is **copied once** from host on first use, then diverges. Token refreshes the agent performs update its own copy. Re-running `claude login` on the host refreshes credentials for *new* agents; existing agents keep their already-issued tokens until those expire.
+- **`cli-docker`:** the host's `.credentials.json` is **bind-mounted** (single file) into every container, so every agent sees the same OAuth file live. Anthropic's rotating refresh tokens require this — per-agent copies would invalidate each other on refresh.
 
-### 4. Log in to your Puffo.ai server
+If you skip `claude login` and try to talk to a `cli-local` / `cli-docker` agent, the first turn will fail with an auth error and the daemon log will point you here.
 
-```bash
-puffoagent login --url https://app.puffo.ai --token <paste_the_token_from_step_2>
-```
-
-This stores the URL + token in `~/.puffoagent/daemon.yml` so the daemon can poll the server for agents you own.
-
-### 5. Start the daemon
+### 3. Start the daemon
 
 ```bash
 puffoagent start
@@ -107,7 +99,7 @@ INFO puffoagent.portal.daemon: puffoagent portal starting
 INFO puffoagent.portal.sync: server sync enabled; url=https://app.puffo.ai interval=30s
 ```
 
-### 6. Create your first agent from the webapp
+### 4. Create your first agent from the webapp
 
 Back on Puffo.ai:
 
@@ -172,7 +164,7 @@ Allowlist pattern syntax:
 Spawn a long-lived `claude --dangerously-skip-permissions` subprocess on your host machine, pipe each Mattermost message in, pipe the reply out. The subprocess stays alive across turns; Claude Code's native session mechanics carry conversation state.
 
 - **How:** one `claude` process per agent, spawned with stream-json I/O. First turn reads the init event for a session id which is persisted to `cli_session.json`. A daemon restart or a subprocess crash re-spawns with `--resume <session_id>` so the conversation picks up seamlessly.
-- **Auth:** the host's `claude login` OAuth credentials at `~/.claude/.credentials.json`. **No `ANTHROPIC_API_KEY` is used or needed.** You pay via your Claude Code subscription, not per-token.
+- **Auth:** Claude Code CLI OAuth — **no `ANTHROPIC_API_KEY` used or needed**, billed via your Claude Code subscription. On first use of each cli-local agent, puffoagent seeds `~/.puffoagent/agents/<id>/.claude/` from your host `~/.claude/` (credentials + settings, no history/caches) and points the agent's claude subprocess at that virtual `$HOME`. From then on sessions, history, and token refreshes stay per-agent. Re-running `claude login` on the host updates credentials for *new* agents only.
 - **Safety model:** 🚨 **None.** `--dangerously-skip-permissions` means the agent can do anything you can do: read any file, run any command, hit any network endpoint. A loud `WARNING` fires in the daemon log on first turn to make sure you saw this.
 - **Use only for:** trusted bots on trusted machines. Pick `cli-docker` instead if you want isolation.
 - **Install:**
@@ -185,13 +177,14 @@ Spawn a long-lived `claude --dangerously-skip-permissions` subprocess on your ho
 
 Same CLI as `cli-local`, but inside its own sandboxed container. The container is the isolation boundary; `--dangerously-skip-permissions` is safe *inside* the container because the agent can't escape back to your host for file access.
 
-- **How:** on first use puffoagent builds `puffo/agent-runtime:v4` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
+- **How:** on first use puffoagent builds `puffo/agent-runtime:v5` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
   - One long-lived container, `puffo-<agent-id>`, runs as a non-root `agent` user.
   - The per-agent workspace (`~/.puffoagent/agents/<id>/workspace/`) is bind-mounted to `/workspace`.
-  - The host's `~/.claude/` is bind-mounted to `/home/agent/.claude` so the container's `claude` CLI inherits your OAuth.
+  - The per-agent `.claude/` (`~/.puffoagent/agents/<id>/.claude/`) is bind-mounted to `/home/agent/.claude` — isolated sessions, history, and settings per agent.
+  - **Only `.credentials.json` is shared with the host** via a single-file bind-mount overlay, so Anthropic's rotating OAuth refresh tokens don't invalidate each other across agents.
   - Each turn `docker exec -i`'s the long-lived `claude` process inside the container.
   - `docker logs -f puffo-<id>` streams a live audit feed (see *Audit log* below).
-- **Auth:** same OAuth as `cli-local` — the host's `~/.claude/` is mounted in, so `claude login` on the host is the one-time setup for every `cli-docker` agent.
+- **Auth:** same `claude login` as `cli-local`. The host's `.credentials.json` is bind-mounted into every container; the rest of the agent's `~/.claude/` is per-agent. One host-side `claude login` covers every `cli-docker` agent, and a refresh performed by any agent (or the host CLI) updates the shared file for all.
 - **Safety model:** the container. The agent can `rm -rf /` all it wants; nothing outside the container is affected. The one thing that *does* persist across container restarts is `/workspace` (bind-mounted), so any files the agent wants to hand off should live there.
 - **Install:** Docker Desktop (Windows/macOS) or `docker-ce` (Linux) + `claude login` on the host once.
 
@@ -337,7 +330,7 @@ Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are
 | **cli-local / cli-docker:** auth errors | `~/.claude/.credentials.json` is missing or stale. Run `claude login` on the host. |
 | **cli-local:** `claude binary not found on PATH` | `npm install -g @anthropic-ai/claude-code`, then confirm `claude --version` works in a fresh shell. |
 | **cli-docker:** `docker binary not found on PATH` | Install Docker Desktop (Windows/macOS) or `docker-ce` (Linux) and make sure the Docker daemon is running. |
-| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded (expect `:v4`). |
+| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded (expect `:v5`). |
 | **cli-docker:** `docker logs` is empty but audit.log has content | GNU `tail -F` can't see inotify events through Docker Desktop's Windows bind-mount. The bundled image already polls on a 1 s timer instead; if you run a custom image, replicate that pattern in your CMD. |
 | **cli-docker:** stale container from previous daemon | Puffoagent force-removes `puffo-<id>` on worker start, so this self-heals. If manual cleanup is needed: `docker rm -f puffo-<agent-id>`. |
 | Can't create a personal access token | Your admin hasn't enabled personal access tokens. They need to flip **System Console → Integrations → Integration Management → Enable Personal Access Tokens**. |

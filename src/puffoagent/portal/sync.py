@@ -161,14 +161,23 @@ def _apply_remote(agent_id: str, remote: dict) -> None:
         team_name=remote.get("team_name", ""),
     )
 
+    # Field ownership split — every field below falls into one of
+    # two groups:
+    #   - SERVER-OWNED: overwritten from the remote record on every
+    #     sync tick (display_name, mattermost, profile.md content).
+    #   - LOCALLY-OWNED: read `existing.X if existing else ...` so
+    #     sync only seeds an initial value; later edits via the CLI
+    #     or a direct agent.yml change are preserved across ticks.
+    #     Today: state, runtime, triggers, created_at.
+    # Don't add a new "server wins every tick" field here without
+    # deliberate discussion — local customisations get clobbered
+    # silently and the user has no signal that it happened.
     cfg = AgentConfig(
         id=agent_id,
-        # ``state`` is locally owned after the agent is materialised.
-        # ``puffoagent agent pause`` / ``resume`` on the host would
-        # otherwise race the next sync tick, which would reset state
-        # to whatever the server last reported. Sync only seeds state
-        # on initial creation. Server-side pause/resume signals need
-        # a separate propagation channel (TODO: task #1 follow-up).
+        # pause/resume on the host would race the next sync tick
+        # and flip back to whatever the server last reported if we
+        # didn't preserve existing.state. Server-side pause/resume
+        # propagation is a follow-up (see task #1 follow-up).
         state=existing.state if existing else remote.get("state", "running"),
         display_name=remote.get("display_name", agent_id),
         mattermost=mattermost,
@@ -176,7 +185,7 @@ def _apply_remote(agent_id: str, remote: dict) -> None:
         profile="profile.md",
         memory_dir="memory",
         workspace_dir="workspace",
-        triggers=TriggerRules(),
+        triggers=existing.triggers if existing else TriggerRules(),
         created_at=existing.created_at if existing else int(time.time()),
     )
     if existing is None or _agent_changed(existing, cfg):

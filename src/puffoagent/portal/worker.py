@@ -13,6 +13,7 @@ The worker:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -111,6 +112,21 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
 
     if kind == "cli-local":
         from ..agent.adapters.local_cli import LocalCLIAdapter
+        # The cli-local permission proxy DMs the DAEMON OPERATOR —
+        # captured during `puffoagent login` from GET /users/me and
+        # persisted to daemon.yml. If it's empty, the MCP callback
+        # returns deny on every tool call (claude then refuses to do
+        # anything). Surface that misconfig loudly here rather than
+        # letting the user debug a silent "agent won't use tools".
+        operator = daemon_cfg.server.operator_username
+        if not operator:
+            logger.warning(
+                "agent %s: cli-local permission proxy has no operator "
+                "username (daemon.yml server.operator_username is empty). "
+                "Run `puffoagent login` again — without it, every tool "
+                "approval will auto-deny.",
+                agent_cfg.id,
+            )
         return LocalCLIAdapter(
             agent_id=agent_cfg.id,
             model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
@@ -122,6 +138,8 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             mattermost_url=agent_cfg.mattermost.url,
             mattermost_token=agent_cfg.mattermost.bot_token,
             team=agent_cfg.mattermost.team_name,
+            owner_username=operator,
+            permission_mode=agent_cfg.runtime.permission_mode,
         )
 
     raise RuntimeError(
@@ -293,6 +311,13 @@ class Worker:
             )
 
         reload_flag_path = Path(workspace_path) / ".puffoagent" / "reload.flag"
+        # Per-turn context file for the cli-local permission hook. The
+        # hook is a separate subprocess claude spawns per tool call,
+        # so it can't reach into the worker's memory — it reads this
+        # file instead. Contains the channel + root the permission
+        # request should reply in so the DM-like prompt lands in the
+        # same thread as the user's original message.
+        current_turn_path = Path(workspace_path) / ".puffoagent" / "current_turn.json"
 
         async def on_message(
             channel_id, channel_name, sender, sender_email, text,
@@ -316,6 +341,21 @@ class Worker:
                     adapter=self._adapter,
                     flag_path=reload_flag_path,
                 )
+            try:
+                current_turn_path.parent.mkdir(parents=True, exist_ok=True)
+                current_turn_path.write_text(
+                    json.dumps({
+                        "channel_id": channel_id,
+                        "root_id": root_id,
+                        "triggering_post_id": post_id,
+                    }),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "agent %s: could not write current_turn.json: %s "
+                    "(permission hook will fail-open)", agent_id, exc,
+                )
             typing_task = asyncio.ensure_future(_keep_typing(client, channel_id, root_id))
             try:
                 reply = await puffo.handle_message(
@@ -332,6 +372,14 @@ class Worker:
                 reply = None
             finally:
                 typing_task.cancel()
+                # Clear the turn context so any proactive/background
+                # agent work that happens after the turn ends doesn't
+                # inherit a stale channel/root. The hook fails-open
+                # when the file is absent.
+                try:
+                    current_turn_path.unlink()
+                except OSError:
+                    pass
             self.runtime.msg_count += 1
             self.runtime.last_event_at = int(time.time())
             if reply:

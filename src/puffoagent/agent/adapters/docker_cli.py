@@ -56,6 +56,7 @@ and puffoagent skips the build step.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import time
@@ -80,9 +81,12 @@ logger = logging.getLogger(__name__)
 # locally, so a stable tag would mask Dockerfile edits.
 DEFAULT_IMAGE = "puffo/agent-runtime:v5"
 
-# Anthropic OAuth access tokens live ~1h; refresh well before that.
-# Unit: seconds since credentials.json mtime.
-CREDENTIAL_REFRESH_AFTER_SECONDS = 45 * 60
+# Timeout for the refresh one-shot. A cold claude + OAuth refresh
+# round-trip + one-turn API call normally lands in 5-15s, but can
+# stretch past 30s on a busy host or after a cold-cache container
+# exec. 120s gives the full chain room without letting a wedged
+# subprocess stall the tick forever.
+REFRESH_ONESHOT_TIMEOUT_SECONDS = 120
 
 # Kept minimal: node (for the claude CLI npm package), git, the tools
 # claude's built-in commands shell out to. No COPY/ADD so the build
@@ -215,53 +219,73 @@ class DockerCLIAdapter(Adapter):
             await self._session.aclose()
             self._session = None
 
-    async def refresh_ping(self) -> None:
-        """Run a silent no-op turn so claude exchanges the OAuth
-        refresh token for a fresh access token. The reply is
-        discarded — we only care about the side effect of the
-        claude process hitting the Anthropic API (which triggers
-        its built-in refresh path when the access token is stale).
-
-        Skipped if the shared ``.credentials.json`` was touched in
-        the last ``CREDENTIAL_REFRESH_AFTER_SECONDS`` — another
-        agent (or the host) already refreshed and every cli-docker
-        agent sees it via the shared bind-mount. This keeps the
-        refresh rate flat as the number of agents grows.
-        """
+    def _credentials_expires_in_seconds(self) -> int | None:
+        # The shared-host ``.credentials.json`` is what every
+        # cli-docker agent's container reads via bind-mount, so we
+        # parse the HOST copy — a refresh inside ANY container
+        # writes through to this file and every other container
+        # sees the new expiresAt on the next read.
         host_credentials = Path.home() / ".claude" / ".credentials.json"
         try:
-            age = time.time() - host_credentials.stat().st_mtime
-        except OSError:
-            # Missing file is surfaced separately by _ensure_started;
-            # no point paying for a refresh turn that will just fail.
-            return
-        if age < CREDENTIAL_REFRESH_AFTER_SECONDS:
-            logger.debug(
-                "agent %s: credentials fresh (age=%.0fs), skipping refresh ping",
-                self.agent_id, age,
-            )
-            return
-        logger.info(
-            "agent %s: credentials %ds old — running refresh ping",
-            self.agent_id, int(age),
-        )
+            data = json.loads(host_credentials.read_text(encoding="utf-8"))
+            expires_ms = int(data["claudeAiOauth"]["expiresAt"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return int(expires_ms / 1000 - time.time())
+
+    async def _run_refresh_oneshot(self) -> None:
+        """Spawn a short-lived ``docker exec <container> claude
+        --print ...`` alongside the long-lived stream-json session.
+
+        The long-lived session refreshes OAuth tokens in memory but
+        doesn't rewrite ``.credentials.json`` until the process
+        exits — which never happens on the happy path. The one-shot
+        process DOES exit, which forces claude-code's credentials-
+        write path. The host-bind-mounted file then reflects the
+        new token for every sibling agent's next API call.
+
+        ``--max-turns 1`` bounds claude so it can't loop; stream-
+        json output guarantees per-event flushing and a clean exit
+        on the ``result`` event instead of buffered text-mode
+        output that can wedge docker-exec pipes.
+        """
         await self._ensure_started()
-        session = self._ensure_session()
+        cmd = [
+            "docker", "exec", self.container_name,
+            "claude", "--dangerously-skip-permissions",
+            "--print", "--max-turns", "1",
+            "--output-format", "stream-json", "--verbose",
+        ]
+        if self.model:
+            cmd.extend(["--model", self.model])
+        # Minimal prompt — any text forces the API hit that drives
+        # the refresh. The model's reply is discarded.
+        cmd.append("ok")
+        started_at = time.time()
         try:
-            await session.run_turn(
-                user_message=(
-                    "[puffoagent-refresh-ping] This is an automated "
-                    "token-refresh ping from the daemon. Reply with "
-                    "exactly [SILENT]. Do not use any tools. Do not "
-                    "post to any channel. Do not reference this "
-                    "message again."
-                ),
-                system_prompt="",
+            rc, stdout, stderr = await asyncio.wait_for(
+                _run_cmd(cmd, check=False),
+                timeout=REFRESH_ONESHOT_TIMEOUT_SECONDS,
             )
-        except Exception as exc:
+        except asyncio.TimeoutError:
             logger.warning(
-                "agent %s: refresh_ping turn failed: %s",
-                self.agent_id, exc,
+                "agent %s: refresh one-shot timed out after %ds",
+                self.agent_id, REFRESH_ONESHOT_TIMEOUT_SECONDS,
+            )
+            return
+        elapsed = time.time() - started_at
+        if rc != 0:
+            out_tail = stdout.decode("utf-8", errors="replace").strip()[-400:]
+            err_tail = stderr.decode("utf-8", errors="replace").strip()[-400:]
+            logger.warning(
+                "agent %s: refresh one-shot rc=%d in %.1fs | "
+                "stdout: %s | stderr: %s",
+                self.agent_id, rc, elapsed, out_tail, err_tail,
+            )
+        else:
+            logger.debug(
+                "agent %s: refresh one-shot rc=0 in %.1fs",
+                self.agent_id, elapsed,
             )
 
     async def aclose(self) -> None:

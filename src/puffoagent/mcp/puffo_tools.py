@@ -292,25 +292,27 @@ async def _resolve_owner_dm(
 async def _await_permission_reply(
     session: aiohttp.ClientSession,
     cfg: ToolsConfig,
-    dm_channel_id: str,
+    thread_root_id: str,
     owner_user_id: str,
     since_ts: int,
 ) -> Optional[bool]:
-    """Poll the DM for a reply from the owner after ``since_ts``.
-    Returns True on approval, False on denial, None on timeout.
+    """Poll the permission-request THREAD for a reply from the
+    owner. Each request is posted as a top-level DM message that
+    becomes a thread root; the owner replies in-thread with y/n.
+    Threading keeps concurrent tool approvals from cross-
+    contaminating — reply to request A stays in A's thread and
+    never gets credited to request B.
 
-    The protocol is intentionally dumb: first message from owner
-    starting with y/Y/approve means allow; anything else (n/no/deny)
-    means deny. Timeout after ``permission_timeout_seconds``.
+    Returns True on approval, False on denial, None on timeout.
+    First message from owner starting with y/Y/approve means allow;
+    anything else means deny.
     """
     deadline = time.time() + cfg.permission_timeout_seconds
     while time.time() < deadline:
         try:
-            # ``per_page=5`` — enough to catch the reply without
-            # dragging in long history.
             data = await _get(
                 session, cfg.url,
-                f"/api/v4/channels/{dm_channel_id}/posts?per_page=5",
+                f"/api/v4/posts/{thread_root_id}/thread",
             )
         except Exception as exc:
             logger.warning("permission poll failed: %s", exc)
@@ -322,6 +324,11 @@ async def _await_permission_reply(
             post = posts.get(pid) or {}
             if post.get("user_id") != owner_user_id:
                 continue
+            # Thread endpoint may include the request's root post if
+            # its parent matched — but the root was posted by the
+            # bot, not the owner, so the user_id filter drops it.
+            # Still, ``since_ts`` is a final safety net against any
+            # cached pre-request message showing up here.
             create_at = int(post.get("create_at", 0))  # ms
             if create_at // 1000 <= since_ts:
                 continue
@@ -678,20 +685,37 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
                 }
             summary = _summarise_tool_input(input)
             request_at = int(time.time())
-            await _post(
+            # Post the request as a top-level DM; the returned post
+            # id becomes the thread root. The user replies IN THE
+            # THREAD, which scopes the decision to this specific
+            # request — when claude fires several tool approvals in
+            # parallel (or back-to-back), each has its own thread
+            # and the replies can't be miscredited.
+            posted = await _post(
                 session, cfg.url, "/api/v4/posts",
                 {
                     "channel_id": dm,
                     "message": (
                         f"🔐 **agent `{cfg.agent_id}` wants to run `{tool_name}`**\n\n"
                         f"{summary}\n\n"
-                        f"reply `y` to approve, `n` to deny "
-                        f"(times out in {int(cfg.permission_timeout_seconds)}s)"
+                        f"**Reply in this thread** with `y` to approve or "
+                        f"`n` to deny (times out in "
+                        f"{int(cfg.permission_timeout_seconds)}s)."
                     ),
                 },
             )
+            thread_root = posted.get("id", "")
+            if not thread_root:
+                logger.warning(
+                    "permission: server did not return a post id for the "
+                    "request — falling back to deny"
+                )
+                return {
+                    "behavior": "deny",
+                    "message": "permission proxy could not post request",
+                }
             decision = await _await_permission_reply(
-                session, cfg, dm, owner_id, request_at,
+                session, cfg, thread_root, owner_id, request_at,
             )
         if decision is True:
             return {"behavior": "allow", "updatedInput": input}

@@ -34,6 +34,8 @@ task #38.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import shutil
@@ -41,7 +43,6 @@ import time
 from pathlib import Path
 
 from ...mcp.config import (
-    PERMISSION_PROMPT_TOOL,
     default_python_executable,
     mcp_env,
     write_cli_mcp_config,
@@ -53,9 +54,54 @@ from .cli_session import AuditLog, ClaudeSession
 logger = logging.getLogger(__name__)
 
 
-# Anthropic OAuth access tokens live ~1h; refresh well before that.
-# Unit: seconds since credentials.json mtime.
-CREDENTIAL_REFRESH_AFTER_SECONDS = 45 * 60
+# Timeout for the refresh one-shot. See docker_cli for the rationale.
+REFRESH_ONESHOT_TIMEOUT_SECONDS = 120
+
+# How many seconds the permission proxy hook will wait for an owner
+# reply before denying. Exposed via PUFFO_PERMISSION_TIMEOUT env var
+# the hook reads on startup.
+PERMISSION_HOOK_TIMEOUT_SECONDS = 300
+
+# Claude Code built-in tools that default mode would normally prompt
+# on. Our PreToolUse hook intercepts these; reads (Read/Glob/Grep)
+# and MCP tools pass through unsurveyed (reads auto-approve in
+# default mode, MCP tools are the agent's talking-to-Mattermost path
+# and shouldn't fire per-call DMs).
+PERMISSION_HOOK_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch"
+
+
+# Claude Code permission modes we pass through to ``--permission-mode``.
+# Excludes ``plan`` (read-only research mode, not useful for chat-reply
+# agents). ``default`` routes everything non-read through our MCP
+# permission-prompt callback, which is what most cli-local agents
+# should use; ``bypassPermissions`` disables the proxy entirely.
+# See https://code.claude.com/docs/en/permission-modes.
+VALID_PERMISSION_MODES = frozenset({
+    "default",
+    "acceptEdits",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
+})
+
+
+def _sanitise_permission_mode(mode: str, agent_id: str) -> str:
+    """Return a validated permission mode, falling back to 'default'
+    with a WARNING if the caller supplied something claude doesn't
+    recognise. Never raises — a bad config value shouldn't kill the
+    worker, but it shouldn't silently look like the user asked for
+    something different either.
+    """
+    if not mode:
+        return "default"
+    if mode in VALID_PERMISSION_MODES:
+        return mode
+    logger.warning(
+        "agent %s: unknown permission_mode %r — falling back to "
+        "'default'. valid: %s",
+        agent_id, mode, sorted(VALID_PERMISSION_MODES),
+    )
+    return "default"
 
 
 class LocalCLIAdapter(Adapter):
@@ -72,6 +118,7 @@ class LocalCLIAdapter(Adapter):
         mattermost_token: str = "",
         team: str = "",
         owner_username: str = "",
+        permission_mode: str = "default",
     ):
         self.agent_id = agent_id
         self.model = model
@@ -88,6 +135,7 @@ class LocalCLIAdapter(Adapter):
         self.mattermost_token = mattermost_token
         self.team = team
         self.owner_username = owner_username
+        self.permission_mode = _sanitise_permission_mode(permission_mode, agent_id)
         self._verified = False
         self._session: ClaudeSession | None = None
 
@@ -121,49 +169,80 @@ class LocalCLIAdapter(Adapter):
             await self._session.aclose()
             self._session = None
 
-    async def refresh_ping(self) -> None:
-        """Run a silent no-op turn so claude exchanges the OAuth
-        refresh token for a fresh access token. Same rationale as
-        ``DockerCLIAdapter.refresh_ping`` — reply is discarded, we
-        only want the side effect of a live API call refreshing the
-        credentials file.
-
-        cli-local agents have their own per-agent
-        ``.credentials.json`` (seeded from host once, then diverges),
-        so the mtime check targets the agent's own file.
-        """
+    def _credentials_expires_in_seconds(self) -> int | None:
+        # cli-local agents have their OWN per-agent
+        # ``.credentials.json`` (seeded from host once, then
+        # diverges), so the check targets the agent's own file —
+        # not the host one. Parses ``expiresAt`` directly rather
+        # than relying on mtime (mtime only advances when the file
+        # is REWRITTEN, not when the token is still valid).
         agent_credentials = self.agent_home_dir / ".claude" / ".credentials.json"
         try:
-            age = time.time() - agent_credentials.stat().st_mtime
-        except OSError:
-            return
-        if age < CREDENTIAL_REFRESH_AFTER_SECONDS:
-            logger.debug(
-                "agent %s: credentials fresh (age=%.0fs), skipping refresh ping",
-                self.agent_id, age,
-            )
-            return
-        logger.info(
-            "agent %s: credentials %ds old — running refresh ping",
-            self.agent_id, int(age),
-        )
+            data = json.loads(agent_credentials.read_text(encoding="utf-8"))
+            expires_ms = int(data["claudeAiOauth"]["expiresAt"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return int(expires_ms / 1000 - time.time())
+
+    async def _run_refresh_oneshot(self) -> None:
+        """Spawn a short-lived ``claude --print ...`` host subprocess
+        with the per-agent ``HOME`` env. Same rationale as
+        DockerCLIAdapter: the long-lived stream-json session
+        refreshes tokens in memory but doesn't write
+        ``.credentials.json`` back out; a separate one-shot process
+        forces the credentials-write path on exit.
+        """
         self._verify()
-        session = self._ensure_session()
+        env = {
+            **os.environ,
+            "HOME": str(self.agent_home_dir),
+            "USERPROFILE": str(self.agent_home_dir),
+        }
+        cmd = [
+            "claude", "--print", "--max-turns", "1",
+            "--output-format", "stream-json", "--verbose",
+        ]
+        if self.model:
+            cmd.extend(["--model", self.model])
+        cmd.append("ok")
+        started_at = time.time()
         try:
-            await session.run_turn(
-                user_message=(
-                    "[puffoagent-refresh-ping] This is an automated "
-                    "token-refresh ping from the daemon. Reply with "
-                    "exactly [SILENT]. Do not use any tools. Do not "
-                    "post to any channel. Do not reference this "
-                    "message again."
-                ),
-                system_prompt="",
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=self.workspace_dir,
             )
-        except Exception as exc:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=REFRESH_ONESHOT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
             logger.warning(
-                "agent %s: refresh_ping turn failed: %s",
-                self.agent_id, exc,
+                "agent %s: refresh one-shot timed out after %ds",
+                self.agent_id, REFRESH_ONESHOT_TIMEOUT_SECONDS,
+            )
+            return
+        except FileNotFoundError:
+            logger.warning(
+                "agent %s: refresh one-shot: claude binary missing",
+                self.agent_id,
+            )
+            return
+        elapsed = time.time() - started_at
+        if proc.returncode != 0:
+            out_tail = stdout.decode("utf-8", errors="replace").strip()[-400:]
+            err_tail = stderr.decode("utf-8", errors="replace").strip()[-400:]
+            logger.warning(
+                "agent %s: refresh one-shot rc=%d in %.1fs | "
+                "stdout: %s | stderr: %s",
+                self.agent_id, proc.returncode, elapsed, out_tail, err_tail,
+            )
+        else:
+            logger.debug(
+                "agent %s: refresh one-shot rc=0 in %.1fs",
+                self.agent_id, elapsed,
             )
 
     async def aclose(self) -> None:
@@ -175,15 +254,21 @@ class LocalCLIAdapter(Adapter):
         if self._session is not None:
             return self._session
         extra = self._prepare_mcp_args()
+        # Register the PreToolUse permission hook before spawning.
+        # settings.json is read fresh on every claude subprocess
+        # start, so this is idempotent-on-every-worker-restart.
+        self._write_permission_hook_settings()
         # Point the subprocess at the per-agent virtual home so
         # claude's ``~/.claude`` resolves inside this agent's own
         # dir. Both HOME (POSIX) and USERPROFILE (Node on Windows)
         # need to be set because Claude Code uses Node's
-        # ``os.homedir()``.
+        # ``os.homedir()``. The PUFFO_* vars are consumed by the
+        # hook subprocess claude spawns per tool call.
         env = {
             **os.environ,
             "HOME": str(self.agent_home_dir),
             "USERPROFILE": str(self.agent_home_dir),
+            **self._permission_hook_env(),
         }
         self._session = ClaudeSession(
             agent_id=self.agent_id,
@@ -199,26 +284,112 @@ class LocalCLIAdapter(Adapter):
         )
         return self._session
 
+    def _permission_hook_env(self) -> dict[str, str]:
+        """Env vars the PreToolUse hook script reads. Claude
+        inherits the parent's env and passes it to hook subprocesses,
+        so setting these on the claude spawn reaches the hook
+        without any other plumbing.
+        """
+        return {
+            "PUFFO_URL": self.mattermost_url,
+            "PUFFO_BOT_TOKEN": self.mattermost_token,
+            "PUFFO_OPERATOR_USERNAME": self.owner_username,
+            "PUFFO_AGENT_ID": self.agent_id,
+            "PUFFO_PERMISSION_TIMEOUT": str(PERMISSION_HOOK_TIMEOUT_SECONDS),
+        }
+
+    def _write_permission_hook_settings(self) -> None:
+        """Write a project-level ``settings.json`` under the agent's
+        workspace ``.claude/`` directory that registers our
+        PreToolUse hook.
+
+        Written to the project level (``workspace/.claude/``), not
+        user level (``agent_home_dir/.claude/``), so this file can
+        be overwritten wholesale without disturbing settings that
+        were seeded from the host. If the file already exists with
+        a prior puffoagent marker, we rewrite cleanly; any other
+        existing content is preserved and we merge the hook in.
+
+        Uses ``default_python_executable()`` as the hook's python
+        so the hook runs under the same interpreter that has
+        puffoagent installed. The matcher filters to the tools
+        default mode would normally prompt on — reads bypass the
+        hook entirely.
+        """
+        settings_path = Path(self.claude_dir) / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Merge into existing content if present — keeps any hooks
+        # the agent set for itself (via MCP reload_system_prompt,
+        # or a hand-edit) while still registering ours.
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (FileNotFoundError, ValueError, OSError):
+            existing = {}
+
+        hook_block = {
+            "matcher": PERMISSION_HOOK_TOOL_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": (
+                    f'"{default_python_executable()}" '
+                    f"-m puffoagent.hooks.permission"
+                ),
+                "timeout": PERMISSION_HOOK_TIMEOUT_SECONDS + 60,
+            }],
+        }
+
+        hooks_cfg = existing.get("hooks") or {}
+        pretool = hooks_cfg.get("PreToolUse") or []
+        # Replace any previous puffoagent entry (keyed by matcher
+        # string) so re-running the worker never stacks duplicates.
+        pretool = [
+            entry for entry in pretool
+            if not (
+                isinstance(entry, dict)
+                and entry.get("matcher") == PERMISSION_HOOK_TOOL_MATCHER
+                and any(
+                    "puffoagent.hooks.permission" in (h.get("command") or "")
+                    for h in (entry.get("hooks") or [])
+                    if isinstance(h, dict)
+                )
+            )
+        ]
+        pretool.append(hook_block)
+        hooks_cfg["PreToolUse"] = pretool
+        existing["hooks"] = hooks_cfg
+
+        tmp = settings_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        tmp.replace(settings_path)
+
     def _build_command(self, extra_args: list[str]) -> list[str]:
-        # NOTE: do NOT pass --dangerously-skip-permissions. cli-local
-        # proxies tool permission decisions to the owner via the MCP
-        # permission-prompt callback instead — see
-        # ``_prepare_mcp_args``. The callback falls back to "deny on
-        # timeout", which is the safer default for a host-level
-        # runtime.
-        cmd = ["claude"]
+        # We pass ``--permission-mode`` rather than
+        # ``--dangerously-skip-permissions`` so the user controls
+        # which tool categories auto-approve. Anything claude would
+        # normally prompt on still flows through the MCP
+        # permission-prompt callback in ``_prepare_mcp_args`` — that
+        # callback falls back to "deny on timeout", which is the
+        # safer default for a host-level runtime.
+        cmd = ["claude", "--permission-mode", self.permission_mode]
         if self.model:
             cmd.extend(["--model", self.model])
         cmd.extend(extra_args)
         return cmd
 
     def _prepare_mcp_args(self) -> list[str]:
-        """Write per-agent MCP config and return the claude-CLI flags
-        that register it + enable the permission-prompt proxy."""
-        # If we don't have a bot token or URL, skip MCP entirely
-        # (we'd be handing claude an un-authable server). The agent
-        # still works; it just lacks send_message / upload_file and
-        # falls back to default claude permission prompts.
+        """Write per-agent MCP config and return the claude-CLI flag
+        that registers it.
+
+        Permission proxying lives in a PreToolUse hook (see
+        ``_write_permission_hook_settings``), NOT in the MCP
+        ``--permission-prompt-tool`` flag. The flag is documented as
+        non-interactive-mode-only, and cli-local runs claude in
+        interactive stream-json mode where the flag is silently
+        ignored. The hook works in every mode.
+        """
         if not (self.mattermost_url and self.mattermost_token):
             logger.warning(
                 "agent %s: cli-local MCP tools unavailable — no mattermost "
@@ -240,10 +411,7 @@ class LocalCLIAdapter(Adapter):
             args=["-m", "puffoagent.mcp.puffo_tools"],
             env=env,
         )
-        return [
-            "--mcp-config", str(self.mcp_config_file),
-            "--permission-prompt-tool", PERMISSION_PROMPT_TOOL,
-        ]
+        return ["--mcp-config", str(self.mcp_config_file)]
 
     def _verify(self) -> None:
         if self._verified:
