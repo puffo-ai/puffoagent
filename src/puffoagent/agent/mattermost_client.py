@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 import aiohttp
 
@@ -14,8 +15,54 @@ _MENTION_RE = re.compile(r"@([a-zA-Z0-9._-]+)")
 STATUS_HEARTBEAT_INTERVAL = 30
 # How often the puffoagent-specific heartbeat is sent to /aiagents/me/heartbeat.
 AI_AGENT_HEARTBEAT_INTERVAL = 30
-# How often buffered "I observed this post" ids are flushed to the server.
-VIEW_RECEIPT_FLUSH_INTERVAL = 5
+
+# Priority tiers for the per-agent message queue. Lower number = higher
+# priority; the consumer pulls lowest first. The order matches what
+# matters most to the user:
+#   1. Human addressed us directly — always first.
+#   2. Another agent addressed us directly (e.g., a handoff from Max).
+#   3. Human talking in a shared channel, not addressing us.
+#   4. Another agent talking in a shared channel, not addressing us.
+#   5. Mattermost system posts (join/leave/invite notifications).
+# "Addressed us" = DM or explicit @mention.
+PRIORITY_MENTIONED_HUMAN = 1
+PRIORITY_MENTIONED_BOT = 2
+PRIORITY_HUMAN = 3
+PRIORITY_BOT = 4
+PRIORITY_SYSTEM = 5
+
+
+def _compute_priority(direct: bool, sender_is_bot: bool, is_system: bool) -> int:
+    if is_system:
+        return PRIORITY_SYSTEM
+    if direct and not sender_is_bot:
+        return PRIORITY_MENTIONED_HUMAN
+    if direct and sender_is_bot:
+        return PRIORITY_MENTIONED_BOT
+    if not sender_is_bot:
+        return PRIORITY_HUMAN
+    return PRIORITY_BOT
+
+
+# Cap follow-up context per turn so a long-running thread doesn't
+# explode the user message. Most useful info is the *latest* posts,
+# so when the count exceeds this, we keep the most recent N.
+FOLLOWUP_CONTEXT_LIMIT = 20
+
+
+def _ms_to_iso(ms: int) -> str:
+    """Mattermost timestamps are ms-since-epoch ints. Render as ISO
+    8601 in UTC for the agent's user message — both unambiguous and
+    sortable by the model.
+    """
+    if not ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(
+            ms / 1000, tz=timezone.utc,
+        ).isoformat(timespec="seconds")
+    except (ValueError, OSError):
+        return ""
 
 
 class MattermostClient:
@@ -46,8 +93,13 @@ class MattermostClient:
         self.bot_username: str = ""
         self._ws = None  # active WebSocket connection for typing events
         self._seq = 1
-        self._view_buffer: set[str] = set()
-        self._view_lock = asyncio.Lock()
+        # Per-listen priority queue + monotonic counter for FIFO
+        # ordering within a single priority tier. Reset on each
+        # listen() call so a reconnect doesn't drag stale items
+        # through — the WS server doesn't replay missed posts on
+        # reconnect, so buffering across reconnect is pointless.
+        self._queue: asyncio.PriorityQueue | None = None
+        self._queue_seq = 0
         self._rpc_handler = None  # set by the agent to serve file RPC calls
         self._background_tasks: list[asyncio.Task] = []
         self.logger = agent_logger(__name__, agent_id)
@@ -91,41 +143,123 @@ class MattermostClient:
             except Exception as e:
                 self.logger.warning(f"Heartbeat error: {e}")
 
-    async def record_post_viewed(self, post_id: str):
-        """Buffer a post id for the next batch flush."""
+    async def _fetch_followup_context(
+        self,
+        session: aiohttp.ClientSession,
+        channel_id: str,
+        raw_root_id: str,
+        primary_post_id: str,
+        since_create_at: int,
+    ) -> list[dict]:
+        """Fetch posts that arrived in the same conversation as the
+        primary message, between the primary's timestamp and now.
+
+        Conversation scope:
+          - If the primary is a thread reply (``raw_root_id`` set),
+            scope = the thread (``GET /posts/{root}/thread``).
+          - Otherwise scope = the channel (``GET /channels/{id}/
+            posts?since={ms}``).
+
+        The primary post itself and any of our own posts are filtered
+        out — the primary is already in the user message, and our own
+        replies are already in the conversation log so re-injecting
+        them would just confuse the model. Result is sorted oldest
+        first and capped at ``FOLLOWUP_CONTEXT_LIMIT``.
+        """
+        if not since_create_at:
+            return []
+        if raw_root_id:
+            url = f"{self.url}/api/v4/posts/{raw_root_id}/thread"
+        else:
+            url = (
+                f"{self.url}/api/v4/channels/{channel_id}/posts"
+                f"?since={since_create_at}"
+            )
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    self.logger.warning(
+                        f"fetch followup context {resp.status}: {body[:200]}"
+                    )
+                    return []
+                data = await resp.json()
+        except Exception as exc:
+            self.logger.warning(f"fetch followup context error: {exc}")
+            return []
+
+        posts = data.get("posts") or {}
+        items: list[dict] = []
+        for pid, post in posts.items():
+            if not isinstance(post, dict):
+                continue
+            if pid == primary_post_id:
+                continue
+            if post.get("user_id") == self.bot_user_id:
+                continue
+            created = int(post.get("create_at", 0) or 0)
+            if created < since_create_at:
+                continue
+            text = post.get("message", "") or ""
+            if not text:
+                # Deleted / system-only posts with no body — skip.
+                continue
+            items.append({
+                "id": pid,
+                "create_at": created,
+                "sender_id": post.get("user_id", ""),
+                "text": text,
+            })
+        items.sort(key=lambda i: i["create_at"])
+        if len(items) > FOLLOWUP_CONTEXT_LIMIT:
+            items = items[-FOLLOWUP_CONTEXT_LIMIT:]
+
+        # Resolve sender usernames once — agents reading the user
+        # message care about the human-friendly @name, not the user
+        # id. Reuses the same authenticated session.
+        sender_ids = {i["sender_id"] for i in items if i["sender_id"]}
+        usernames: dict[str, str] = {}
+        for sid in sender_ids:
+            try:
+                async with session.get(
+                    f"{self.url}/api/v4/users/{sid}",
+                ) as resp:
+                    if resp.status == 200:
+                        user = await resp.json()
+                        usernames[sid] = user.get("username", sid)
+                    else:
+                        usernames[sid] = sid
+            except Exception:
+                usernames[sid] = sid
+        for i in items:
+            i["sender_username"] = usernames.get(i["sender_id"], i["sender_id"])
+            i["timestamp"] = _ms_to_iso(i["create_at"])
+        return items
+
+    async def _post_view_receipt(self, session: aiohttp.ClientSession, post_id: str):
+        """Send a "this agent has started processing this post" signal.
+        Fired when the consumer pulls the post from its priority
+        queue, so "viewed by" in the webapp reflects actual attention,
+        not just message delivery.
+
+        Reuses the batch endpoint with a single-item list so the
+        server-side broadcast path is identical to the former
+        behavior — only the timing changes.
+        """
         if not post_id:
             return
-        async with self._view_lock:
-            self._view_buffer.add(post_id)
-
-    async def _view_flush_loop(self, session: aiohttp.ClientSession):
-        """Flush buffered post view receipts every VIEW_RECEIPT_FLUSH_INTERVAL.
-        Uses POST /posts/views/batch; server broadcasts an
-        ai_agent_post_viewed WS event per post so the webapp updates the
-        viewed-by icon without a page reload.
-        """
-        while True:
-            await asyncio.sleep(VIEW_RECEIPT_FLUSH_INTERVAL)
-            async with self._view_lock:
-                if not self._view_buffer:
-                    continue
-                batch = list(self._view_buffer)
-                self._view_buffer.clear()
-            try:
-                async with session.post(
-                    f"{self.url}/api/v4/posts/views/batch",
-                    json={"post_ids": batch},
-                ) as resp:
-                    if resp.status not in (200, 201):
-                        body = await resp.text()
-                        self.logger.warning(f"View batch flush failed: {resp.status} {body}")
-                        # Re-buffer on failure so we don't drop view receipts.
-                        async with self._view_lock:
-                            self._view_buffer.update(batch)
-            except Exception as e:
-                self.logger.warning(f"View batch flush error: {e}")
-                async with self._view_lock:
-                    self._view_buffer.update(batch)
+        try:
+            async with session.post(
+                f"{self.url}/api/v4/posts/views/batch",
+                json={"post_ids": [post_id]},
+            ) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    self.logger.warning(
+                        f"View receipt post failed ({post_id}): {resp.status} {body}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"View receipt post error ({post_id}): {e}")
 
     def set_rpc_handler(self, handler):
         """Register a callable that services `ai_agent_rpc_request` events.
@@ -153,19 +287,25 @@ class MattermostClient:
         await self._send_rpc_response(request_id, ok, payload, error)
 
     async def _send_rpc_response(self, request_id: str, ok: bool, data, error):
-        if self._ws is None:
+        ws = self._ws
+        if ws is None or ws.closed:
             return
         self._seq += 1
-        await self._ws.send_json({
-            "seq": self._seq,
-            "action": "ai_agent_rpc_response",
-            "data": {
-                "request_id": request_id,
-                "ok": ok,
-                "data": data or {},
-                "error": error or "",
-            },
-        })
+        try:
+            await ws.send_json({
+                "seq": self._seq,
+                "action": "ai_agent_rpc_response",
+                "data": {
+                    "request_id": request_id,
+                    "ok": ok,
+                    "data": data or {},
+                    "error": error or "",
+                },
+            })
+        except Exception as e:
+            # Don't let a write to a dying socket bubble out of listen()
+            # — the supervisor will reconnect on its own.
+            self.logger.warning(f"RPC response send failed: {e}")
 
     async def _set_online(self):
         """Set bot status to online via REST API."""
@@ -186,11 +326,12 @@ class MattermostClient:
 
     async def send_typing(self, channel_id: str, parent_id: str = ""):
         """Send a typing indicator for this channel via WebSocket."""
-        if self._ws is None:
+        ws = self._ws
+        if ws is None or ws.closed:
             return
         try:
             self._seq += 1
-            await self._ws.send_json({
+            await ws.send_json({
                 "seq": self._seq,
                 "action": "user_typing",
                 "data": {"channel_id": channel_id, "parent_id": parent_id},
@@ -315,10 +456,15 @@ class MattermostClient:
             # new session. Each reconnect would otherwise stack up loops
             # pointing at a closed session.
             await self._cancel_background_tasks()
+            # Fresh queue + seq per listen — reconnect discards anything
+            # queued but not yet pulled (the old session's aiohttp is
+            # about to close under us anyway).
+            self._queue = asyncio.PriorityQueue()
+            self._queue_seq = 0
             self._background_tasks = [
                 asyncio.ensure_future(self._status_heartbeat()),
                 asyncio.ensure_future(self._ai_agent_heartbeat_loop(session)),
-                asyncio.ensure_future(self._view_flush_loop(session)),
+                asyncio.ensure_future(self._consume_queue(on_message, session)),
             ]
 
             try:
@@ -337,14 +483,18 @@ class MattermostClient:
                             event = json.loads(msg.data)
                             await self._handle_event(event, on_message, session)
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            self.logger.warning("WebSocket closed/error, reconnecting...")
+                            self.logger.warning(
+                                "WebSocket %s, reconnecting...",
+                                "error" if msg.type == aiohttp.WSMsgType.ERROR else "closed",
+                            )
                             break
             finally:
-                # Always kill the background loops before letting the session
-                # context manager close the aiohttp.ClientSession — otherwise
-                # their in-flight requests fire against a closed session.
-                await self._cancel_background_tasks()
+                # Null _ws first so any concurrent background-task await
+                # sees None and bails before we close the session under it.
+                # Then cancel the background loops so their in-flight
+                # requests don't fire against a closed aiohttp session.
                 self._ws = None
+                await self._cancel_background_tasks()
 
     async def _cancel_background_tasks(self):
         tasks = self._background_tasks
@@ -373,21 +523,33 @@ class MattermostClient:
         channel_id = post.get("channel_id", "")
         text = post.get("message", "")
         post_id = post.get("id", "")
-        root_id = post.get("root_id", "") or post_id
+        # ``raw_root_id`` is empty when the post is NOT in a thread —
+        # we need that distinction to decide whether to fetch
+        # /posts/{root}/thread vs /channels/{id}/posts. ``root_id``
+        # (the fallback to ``post_id``) stays the value we use when
+        # POSTing replies, so a reply to a non-threaded post starts
+        # a new thread under that post.
+        raw_root_id = post.get("root_id", "") or ""
+        root_id = raw_root_id or post_id
+        # Mattermost create_at is ms-since-epoch. We need this so the
+        # consumer can fetch follow-up context "since this message"
+        # and so the agent can see the absolute time of each message.
+        create_at = int(post.get("create_at", 0) or 0)
         file_ids = post.get("file_ids") or []
+        # Mattermost tags automated posts (channel join/leave,
+        # header changes, invites) with a type starting with
+        # ``system_``. Everything user-authored has ``type=""``.
+        post_type = post.get("type", "") or ""
 
         # Ignore own messages
         if sender_id == self.bot_user_id:
             return
 
-        # Every observed post (including ones we don't reply to) should
-        # generate a view receipt.
-        await self.record_post_viewed(post_id)
-
         channel_type = event["data"].get("channel_type", "")
         channel_name = event["data"].get("channel_display_name", channel_id)
         is_dm = channel_type == "D"
         is_mention = f"@{self.bot_username}" in text
+        is_system = post_type.startswith("system_")
 
         user = await self.get_user(sender_id)
         sender_name = user.get("username", sender_id)
@@ -405,13 +567,89 @@ class MattermostClient:
         mentions = await self._resolve_mentions(session, text)
 
         clean_text = text.replace(f"@{self.bot_username}", "").strip()
+        direct = is_dm or is_mention
+        priority = _compute_priority(direct, sender_is_bot, is_system)
         attach_summary = f" +{len(attachments)} attachment(s)" if attachments else ""
         self.logger.info(
-            f"[{'dm' if is_dm else 'mention' if is_mention else 'channel'}] "
+            f"[prio={priority}] [{'dm' if is_dm else 'mention' if is_mention else 'channel'}] "
             f"[{channel_name}] @{sender_name}:{attach_summary} {clean_text}"
         )
-        await on_message(
-            channel_id, channel_name, sender_name, sender_email,
-            clean_text, root_id, is_dm or is_mention, attachments,
-            sender_is_bot, mentions,
-        )
+
+        # Push to the priority queue. The consumer task pulls, fires
+        # the view-receipt signal, then dispatches to ``on_message``.
+        # The (priority, seq) prefix keeps dicts out of tuple
+        # comparison — seq is monotonic so two items never tie past
+        # the second element.
+        if self._queue is None:
+            self.logger.warning(
+                "no queue available — dropping post %s (should only happen during shutdown)",
+                post_id,
+            )
+            return
+        self._queue_seq += 1
+        await self._queue.put((priority, self._queue_seq, {
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "sender_name": sender_name,
+            "sender_email": sender_email,
+            "clean_text": clean_text,
+            "root_id": root_id,
+            "raw_root_id": raw_root_id,
+            "direct": direct,
+            "attachments": attachments,
+            "sender_is_bot": sender_is_bot,
+            "mentions": mentions,
+            "post_id": post_id,
+            "create_at": create_at,
+        }))
+
+    async def _consume_queue(
+        self, on_message, session: aiohttp.ClientSession,
+    ) -> None:
+        """Pull one queued post at a time, fire its view-receipt, and
+        dispatch to ``on_message``. Strictly serial — only one turn
+        runs per agent at a time — so the claude session's conversation
+        history stays coherent and the agent doesn't try to answer two
+        channels in parallel (which was causing spurious ``[SILENT]``
+        replies when the model got confused by interleaved context).
+        """
+        queue = self._queue
+        assert queue is not None
+        while True:
+            _priority, _seq, args = await queue.get()
+            post_id = args.get("post_id", "")
+            # Fire the "viewed by this agent" signal NOW (not at
+            # message-receive time) so other users / agents see the
+            # icon flip when we actually start processing — a real
+            # "paying attention" indicator rather than a delivery
+            # receipt.
+            await self._post_view_receipt(session, post_id)
+            # Fetch any messages that arrived in the same thread or
+            # channel since this post — the agent needs the latest
+            # state of the conversation, not just what was visible
+            # when this post was queued. Without this, a reply to m1
+            # could land after the conversation has already moved on
+            # via m2, m3, m4.
+            followups = await self._fetch_followup_context(
+                session,
+                channel_id=args["channel_id"],
+                raw_root_id=args.get("raw_root_id", ""),
+                primary_post_id=post_id,
+                since_create_at=args.get("create_at", 0),
+            )
+            try:
+                await on_message(
+                    args["channel_id"], args["channel_name"],
+                    args["sender_name"], args["sender_email"],
+                    args["clean_text"], args["root_id"], args["direct"],
+                    args["attachments"], args["sender_is_bot"],
+                    args["mentions"],
+                    post_id, args.get("create_at", 0), followups,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.error(
+                    f"on_message handler failed for post {post_id}: {e}",
+                    exc_info=True,
+                )

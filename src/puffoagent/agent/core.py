@@ -1,10 +1,26 @@
 import os
+from datetime import datetime, timezone
 
 from ._logging import agent_logger
 from .adapters import Adapter, TurnContext
 from .memory import MemoryManager
 
 MAX_LOG_ENTRIES = 60
+
+
+def _ms_to_iso(ms: int) -> str:
+    """Render a Mattermost ms-since-epoch timestamp as ISO 8601 in
+    UTC. Empty string when ms is 0/missing — the caller drops the
+    field rather than emitting an empty timestamp.
+    """
+    if not ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(
+            ms / 1000, tz=timezone.utc,
+        ).isoformat(timespec="seconds")
+    except (ValueError, OSError):
+        return ""
 
 
 class PuffoAgent:
@@ -57,12 +73,18 @@ class PuffoAgent:
         sender_is_bot: bool = False,
         mentions: list[dict] | None = None,
         on_progress=None,
+        post_id: str = "",
+        create_at: int = 0,
+        followups: list[dict] | None = None,
     ) -> str | None:
         self._append_user(
             channel_name, sender, sender_email, text,
             attachments=attachments,
             sender_is_bot=sender_is_bot,
             mentions=mentions,
+            post_id=post_id,
+            create_at=create_at,
+            followups=followups,
         )
 
         ctx = TurnContext(
@@ -91,6 +113,9 @@ class PuffoAgent:
         attachments: list[str] | None,
         sender_is_bot: bool = False,
         mentions: list[dict] | None = None,
+        post_id: str = "",
+        create_at: int = 0,
+        followups: list[dict] | None = None,
     ):
         # Structured markdown block makes it obvious to the LLM what is
         # context metadata and what is the actual message content, which
@@ -99,9 +124,16 @@ class PuffoAgent:
         # puffo primer (see shared_content.DEFAULT_SHARED_CLAUDE_MD).
         lines = [
             "- channel: " + channel_name,
-            f"- sender: {sender}" + (f" ({sender_email})" if sender_email else ""),
-            f"- sender_type: {'bot' if sender_is_bot else 'human'}",
         ]
+        if post_id:
+            lines.append(f"- post_id: {post_id}")
+        ts_iso = _ms_to_iso(create_at)
+        if ts_iso:
+            lines.append(f"- timestamp: {ts_iso}")
+        lines.append(
+            f"- sender: {sender}" + (f" ({sender_email})" if sender_email else "")
+        )
+        lines.append(f"- sender_type: {'bot' if sender_is_bot else 'human'}")
         if mentions:
             lines.append("- mentions:")
             for m in mentions:
@@ -112,6 +144,22 @@ class PuffoAgent:
             for path in attachments:
                 lines.append(f"  - {path}")
         lines.append("- message: " + text)
+        if followups:
+            # Messages that arrived in the same thread / channel
+            # AFTER this one was queued. The agent should read them
+            # before committing to a reply — the conversation may
+            # have moved on, made this question redundant, or
+            # answered itself. The agent should only respond if its
+            # reply still adds value given everything below.
+            lines.append("- followup_messages_since:")
+            for f in followups:
+                ts = f.get("timestamp", "") or _ms_to_iso(f.get("create_at", 0))
+                fid = f.get("id", "")
+                fsender = f.get("sender_username", "") or f.get("sender_id", "")
+                ftext = f.get("text", "") or ""
+                lines.append(
+                    f"  - [{ts} post:{fid}] @{fsender}: {ftext}"
+                )
         self.log.append({"role": "user", "content": "\n".join(lines)})
         self._truncate_log()
 

@@ -84,6 +84,18 @@ class Adapter(ABC):
         """
         return None
 
+    async def refresh_ping(self) -> None:
+        """Force an auth round-trip so Anthropic's rotating OAuth
+        refresh token gets exchanged before it expires. The worker
+        calls this periodically on idle agents.
+
+        CLI adapters override this to run a silent no-op turn — the
+        claude subprocess handles the refresh internally as part of
+        any API call. SDK / chat-only use static API keys and don't
+        need it; default no-op here is correct for them.
+        """
+        return None
+
     async def aclose(self) -> None:
         """Release any runtime resources (containers, subprocesses, MCP
         servers). Default is a no-op for stateless adapters.

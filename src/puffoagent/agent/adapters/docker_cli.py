@@ -11,11 +11,22 @@ container's ``/home/agent`` is bind-mounted from
 ``~/.puffoagent/agents/<id>/`` on the host, so the CLI's
 ``~/.claude/`` inside the container resolves to
 ``~/.puffoagent/agents/<id>/.claude/`` on the host — a per-agent
-dir, seeded once from the operator's real ``~/.claude`` (credentials
-+ settings only). Bot sessions, history, and token refreshes stay
+dir, seeded once from the operator's real ``~/.claude`` (settings
+only). Bot sessions, history, and the cache stay
 inside that dir — no bleed between agents, no bleed back to the
 operator's personal claude state. No ``ANTHROPIC_API_KEY`` is
 injected.
+
+**OAuth credentials.** The CLI's ``~/.claude/.credentials.json``
+specifically is a *single-file* bind-mount of the host's
+``~/.claude/.credentials.json`` rather than a per-agent copy.
+Anthropic's OAuth uses rotating refresh tokens — each refresh
+invalidates the prior refresh token — so per-agent copies would
+race each other and constantly re-expire. A single shared file
+means whichever process refreshes (host CLI, any agent) updates
+the canonical source and every other agent sees the new access
+token on its next read. Only ``.credentials.json`` is shared;
+sessions, history, settings, and the cache remain per-agent.
 
 **Cross-agent coordination.** A second bind-mount exposes
 ``~/.puffoagent/shared/`` at ``/workspace/.shared`` inside the
@@ -47,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from pathlib import Path
 
 from ...mcp.config import (
@@ -67,6 +79,10 @@ logger = logging.getLogger(__name__)
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
 DEFAULT_IMAGE = "puffo/agent-runtime:v5"
+
+# Anthropic OAuth access tokens live ~1h; refresh well before that.
+# Unit: seconds since credentials.json mtime.
+CREDENTIAL_REFRESH_AFTER_SECONDS = 45 * 60
 
 # Kept minimal: node (for the claude CLI npm package), git, the tools
 # claude's built-in commands shell out to. No COPY/ADD so the build
@@ -199,6 +215,55 @@ class DockerCLIAdapter(Adapter):
             await self._session.aclose()
             self._session = None
 
+    async def refresh_ping(self) -> None:
+        """Run a silent no-op turn so claude exchanges the OAuth
+        refresh token for a fresh access token. The reply is
+        discarded — we only care about the side effect of the
+        claude process hitting the Anthropic API (which triggers
+        its built-in refresh path when the access token is stale).
+
+        Skipped if the shared ``.credentials.json`` was touched in
+        the last ``CREDENTIAL_REFRESH_AFTER_SECONDS`` — another
+        agent (or the host) already refreshed and every cli-docker
+        agent sees it via the shared bind-mount. This keeps the
+        refresh rate flat as the number of agents grows.
+        """
+        host_credentials = Path.home() / ".claude" / ".credentials.json"
+        try:
+            age = time.time() - host_credentials.stat().st_mtime
+        except OSError:
+            # Missing file is surfaced separately by _ensure_started;
+            # no point paying for a refresh turn that will just fail.
+            return
+        if age < CREDENTIAL_REFRESH_AFTER_SECONDS:
+            logger.debug(
+                "agent %s: credentials fresh (age=%.0fs), skipping refresh ping",
+                self.agent_id, age,
+            )
+            return
+        logger.info(
+            "agent %s: credentials %ds old — running refresh ping",
+            self.agent_id, int(age),
+        )
+        await self._ensure_started()
+        session = self._ensure_session()
+        try:
+            await session.run_turn(
+                user_message=(
+                    "[puffoagent-refresh-ping] This is an automated "
+                    "token-refresh ping from the daemon. Reply with "
+                    "exactly [SILENT]. Do not use any tools. Do not "
+                    "post to any channel. Do not reference this "
+                    "message again."
+                ),
+                system_prompt="",
+            )
+        except Exception as exc:
+            logger.warning(
+                "agent %s: refresh_ping turn failed: %s",
+                self.agent_id, exc,
+            )
+
     async def aclose(self) -> None:
         if self._session is not None:
             await self._session.aclose()
@@ -291,6 +356,9 @@ class DockerCLIAdapter(Adapter):
             # .claude/.credentials.json, .claude/settings.json, and
             # sibling .claude.json. Each agent gets its own copy so
             # sessions/history/cache writes stay isolated per agent.
+            # Note: .credentials.json is *also* seeded but the docker
+            # mount below overlays it with the host file so refreshes
+            # propagate across agents — see docstring for rationale.
             host_home = Path.home()
             seeded = seed_claude_home(host_home, self.agent_home_dir)
             if seeded:
@@ -298,13 +366,12 @@ class DockerCLIAdapter(Adapter):
                     "agent %s: seeded per-agent virtual $HOME at %s from %s",
                     self.agent_id, self.agent_home_dir, host_home,
                 )
-            agent_claude = self.agent_home_dir / ".claude"
-            if not (agent_claude / ".credentials.json").exists():
+            if not (host_home / ".claude" / ".credentials.json").exists():
                 logger.warning(
-                    "agent %s: no .credentials.json in %s (and none at %s). "
-                    "run `claude login` on the host, then restart the agent "
-                    "— first turn will otherwise fail with an auth error.",
-                    self.agent_id, agent_claude, host_home / ".claude",
+                    "agent %s: host has no %s — run `claude login` on the "
+                    "host, then restart the agent. First turn will fail "
+                    "with an auth error otherwise.",
+                    self.agent_id, host_home / ".claude" / ".credentials.json",
                 )
             await self._ensure_image()
             # Nuke any lingering container from a prior daemon run so
@@ -352,6 +419,16 @@ class DockerCLIAdapter(Adapter):
         # root and break the container's ``agent`` user writes).
         self.agent_home_dir.mkdir(parents=True, exist_ok=True)
         (self.agent_home_dir / ".claude").mkdir(parents=True, exist_ok=True)
+        # Resolve the host's .credentials.json path for the shared
+        # bind-mount below. Existence was already checked in
+        # _ensure_started; if the file is missing here we'd hit a
+        # confusing docker error, so guard with a touch — an empty
+        # file is still a valid mount source even if claude will
+        # then fail at auth time with a clearer message.
+        host_credentials = Path.home() / ".claude" / ".credentials.json"
+        if not host_credentials.exists():
+            host_credentials.parent.mkdir(parents=True, exist_ok=True)
+            host_credentials.touch()
         # ``.claude.json`` is a FILE sibling to the .claude/ dir.
         # Touch it so the bind-mount below resolves to a real file
         # (without this, Docker creates a directory at the mount
@@ -365,15 +442,19 @@ class DockerCLIAdapter(Adapter):
         # without an image rebuild.
         export_mcp_script(self.mcp_script_dir)
 
-        # Two bind-mounts for every cli-docker agent:
-        #   1. workspace — per-agent, carries the project-level
-        #      .claude/CLAUDE.md that Claude Code auto-discovers.
-        #   2. creds — puffoagent-owned OAuth state, shared across
-        #      cli-docker agents but isolated from the user's host
-        #      ~/.claude.
+        # Five bind-mounts for every cli-docker agent:
+        #   1. workspace        — per-agent project root + cwd.
+        #   2. .claude dir      — per-agent claude identity (sessions,
+        #                         history, settings, cache).
+        #   3. .credentials.json — SHARED with host (single file
+        #                         overlay; see docstring).
+        #   4. .claude.json     — per-agent CLI user-level config.
+        #   5. shared_fs        — cross-agent cooperation dir.
+        #   6. mcp_script_dir   — host puffo_tools.py for the MCP
+        #                         server (read-only).
         # Project-level .claude/ lives INSIDE workspace_dir already,
-        # so a single workspace mount covers both project config and
-        # session artifacts the agent writes.
+        # so the workspace mount covers both project config and
+        # session artifacts the agent writes there.
         cmd = [
             "docker", "run", "-d",
             "--name", self.container_name,
@@ -383,9 +464,19 @@ class DockerCLIAdapter(Adapter):
             "-v", f"{self.workspace_dir}:/workspace",
             # Per-agent claude identity. The agent's private
             # ``.claude`` dir on the host becomes the container's
-            # ``/home/agent/.claude`` — isolated credentials,
-            # sessions, history, and cache per agent.
+            # ``/home/agent/.claude`` — isolated sessions, history,
+            # settings, and cache per agent.
             "-v", f"{self.claude_home_src}:/home/agent/.claude",
+            # OAuth credentials are SHARED — single-file bind-mount of
+            # the host's .credentials.json overlays the per-agent copy
+            # inside the .claude dir mount above. Order matters:
+            # this mount must come AFTER the dir mount for Docker to
+            # treat it as an overlay rather than a no-op. Whichever
+            # process refreshes (host or any agent) updates the file
+            # in place; every other agent picks up the new access
+            # token on its next read. Avoids the rotating-refresh-
+            # token race that per-agent copies otherwise hit.
+            "-v", f"{host_credentials}:/home/agent/.claude/.credentials.json",
             # Claude CLI also reads a sibling ``~/.claude.json`` for
             # user-level config; without this mount, the file lives
             # on the container's ephemeral filesystem and is lost on

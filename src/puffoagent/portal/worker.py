@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 
 RECONNECT_BACKOFF_SECONDS = 5.0
 
+# How often the worker nudges the adapter to check whether OAuth
+# credentials are stale and need a refresh ping. The adapter itself
+# decides whether to actually run a refresh turn based on the mtime
+# of ``.credentials.json`` — this interval is just the poll rate.
+CREDENTIAL_REFRESH_TICK_SECONDS = 10 * 60
+
 
 def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
     """Select and construct the adapter for an agent based on
@@ -291,6 +297,7 @@ class Worker:
         async def on_message(
             channel_id, channel_name, sender, sender_email, text,
             root_id, direct, attachments, sender_is_bot, mentions,
+            post_id, create_at, followups,
         ):
             # Agent can drop a reload flag via the reload_system_prompt
             # MCP tool. Honour it BEFORE the turn so the first message
@@ -316,6 +323,9 @@ class Worker:
                     attachments=attachments,
                     sender_is_bot=sender_is_bot,
                     mentions=mentions,
+                    post_id=post_id,
+                    create_at=create_at,
+                    followups=followups,
                 )
             except Exception as exc:
                 logger.error("agent %s: handle_message error: %s", agent_id, exc, exc_info=True)
@@ -336,7 +346,41 @@ class Worker:
                 except asyncio.TimeoutError:
                     pass
 
+        async def credential_refresh():
+            """Periodically nudge the adapter to refresh its OAuth
+            credentials before they expire. Idle agents would
+            otherwise let the access token lapse; the adapter's
+            own mtime check keeps this cheap for agents whose
+            shared credentials file was refreshed elsewhere.
+            """
+            # First tick: wait one interval so we don't pile onto
+            # the worker's warm() with a refresh at startup.
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=CREDENTIAL_REFRESH_TICK_SECONDS,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            while not self._stop.is_set():
+                try:
+                    await self._adapter.refresh_ping()
+                except Exception as exc:
+                    logger.warning(
+                        "agent %s: credential refresh tick failed: %s",
+                        agent_id, exc,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(),
+                        timeout=CREDENTIAL_REFRESH_TICK_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
         hb_task = asyncio.ensure_future(heartbeat())
+        refresh_task = asyncio.ensure_future(credential_refresh())
         try:
             while not self._stop.is_set():
                 try:
@@ -345,10 +389,10 @@ class Worker:
                     raise
                 except Exception as exc:
                     logger.warning(
-                        "agent %s: listen() crashed: %s — reconnecting in %.1fs",
-                        agent_id, exc, RECONNECT_BACKOFF_SECONDS,
+                        "agent %s: listen() crashed: %s: %s — reconnecting in %.1fs",
+                        agent_id, type(exc).__name__, exc, RECONNECT_BACKOFF_SECONDS,
                     )
-                    self.runtime.error = str(exc)
+                    self.runtime.error = f"{type(exc).__name__}: {exc}"
                     self.runtime.save(agent_id)
                 if self._stop.is_set():
                     break
@@ -358,10 +402,12 @@ class Worker:
                     pass
         finally:
             hb_task.cancel()
-            try:
-                await hb_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            refresh_task.cancel()
+            for task in (hb_task, refresh_task):
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             self.runtime.status = "stopped"
             self.runtime.save(agent_id)
 

@@ -49,6 +49,41 @@ logger = logging.getLogger(__name__)
 AUDIT_FIELD_MAX = 2000
 
 
+# Substrings (case-insensitive) that indicate the claude subprocess
+# emitted an auth / token failure as its reply instead of a real
+# response. Kept STRONG-ONLY: every marker is text the model has no
+# reason to produce in a normal answer. Weak markers like "401",
+# "oauth", "unauthorized" were dropped because users discussing HTTP
+# / auth concepts would otherwise tip the retry loop into a 45s
+# stall on a perfectly valid reply.
+_AUTH_ERROR_MARKERS = (
+    "please run /login",
+    "please run `claude /login`",
+    "run `claude login`",
+    "invalid api key",
+    "invalid_grant",
+    "authentication failed",
+    "credentials expired",
+)
+
+AUTH_ERROR_REPLY = "Agent Token Refreshing Needed"
+
+# Backoffs between retries when an auth-error reply is detected.
+# 5 total attempts (initial + 4 retries) for a worst case of ~45s
+# of waiting. The first interval is short on purpose: the most
+# common cause is a multi-agent rotating-refresh-token race that
+# resolves within a second of the winner writing the new token to
+# the shared `.credentials.json`.
+AUTH_RETRY_BACKOFFS_SECONDS = (3, 6, 12, 24)
+
+
+def _looks_like_auth_error(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_ERROR_MARKERS)
+
+
 class AuditLog:
     """Per-agent ndjson audit log.
 
@@ -160,7 +195,60 @@ class ClaudeSession:
     async def run_turn(self, user_message: str, system_prompt: str) -> TurnResult:
         async with self._lock:
             await self._ensure_running(system_prompt)
-            return await self._one_turn(user_message)
+            # Retry loop for auth-error replies. The most common
+            # cause is a transient — multi-agent rotating-refresh-
+            # token race or a 5xx blip on Anthropic's auth path —
+            # so a few short backoffs almost always rescue the turn
+            # without the user ever seeing AUTH_ERROR_REPLY.
+            attempts = len(AUTH_RETRY_BACKOFFS_SECONDS) + 1
+            last_result: TurnResult | None = None
+            for attempt in range(attempts):
+                if attempt > 0:
+                    delay = AUTH_RETRY_BACKOFFS_SECONDS[attempt - 1]
+                    logger.warning(
+                        "agent %s: auth-error reply on attempt %d/%d; "
+                        "retrying in %ds",
+                        self.agent_id, attempt, attempts, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    # Subprocess may have died during the wait (e.g.
+                    # crash from the auth failure). Re-ensure running
+                    # so the retry has somewhere to go; on respawn
+                    # claude re-reads the shared credentials file.
+                    await self._ensure_running(system_prompt)
+                result = await self._one_turn(user_message)
+                if not _looks_like_auth_error(result.reply):
+                    return result
+                last_result = result
+                if self.audit is not None:
+                    self.audit.write(
+                        "auth_error.detected",
+                        attempt=attempt + 1,
+                        of=attempts,
+                        reply=result.reply,
+                    )
+            # All attempts exhausted — surface the short message.
+            logger.error(
+                "agent %s: auth error persisted across %d attempts; "
+                "returning %r. last reply: %s",
+                self.agent_id, attempts, AUTH_ERROR_REPLY,
+                (last_result.reply if last_result else "")[:500],
+            )
+            if self.audit is not None:
+                self.audit.write(
+                    "auth_error.exhausted_retries",
+                    attempts=attempts,
+                    reply=last_result.reply if last_result else "",
+                )
+            if last_result is None:
+                return TurnResult(reply=AUTH_ERROR_REPLY)
+            return TurnResult(
+                reply=AUTH_ERROR_REPLY,
+                input_tokens=last_result.input_tokens,
+                output_tokens=last_result.output_tokens,
+                tool_calls=last_result.tool_calls,
+                metadata=last_result.metadata,
+            )
 
     async def warm(self, system_prompt: str) -> None:
         """Spawn the claude subprocess without running a turn so the
@@ -454,6 +542,9 @@ class ClaudeSession:
                 "agent %s: claude turn produced no text reply. events seen: %s",
                 self.agent_id, event_types_seen,
             )
+        # Auth-error detection + rewriting lives in run_turn so the
+        # retry loop can see the raw reply per attempt; _one_turn
+        # only owns "run one turn, report what happened".
         if self.audit is not None:
             self.audit.write(
                 "turn.end",

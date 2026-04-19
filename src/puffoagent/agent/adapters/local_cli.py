@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 from ...mcp.config import (
@@ -50,6 +51,11 @@ from .base import Adapter, TurnContext, TurnResult
 from .cli_session import AuditLog, ClaudeSession
 
 logger = logging.getLogger(__name__)
+
+
+# Anthropic OAuth access tokens live ~1h; refresh well before that.
+# Unit: seconds since credentials.json mtime.
+CREDENTIAL_REFRESH_AFTER_SECONDS = 45 * 60
 
 
 class LocalCLIAdapter(Adapter):
@@ -114,6 +120,51 @@ class LocalCLIAdapter(Adapter):
         if self._session is not None:
             await self._session.aclose()
             self._session = None
+
+    async def refresh_ping(self) -> None:
+        """Run a silent no-op turn so claude exchanges the OAuth
+        refresh token for a fresh access token. Same rationale as
+        ``DockerCLIAdapter.refresh_ping`` — reply is discarded, we
+        only want the side effect of a live API call refreshing the
+        credentials file.
+
+        cli-local agents have their own per-agent
+        ``.credentials.json`` (seeded from host once, then diverges),
+        so the mtime check targets the agent's own file.
+        """
+        agent_credentials = self.agent_home_dir / ".claude" / ".credentials.json"
+        try:
+            age = time.time() - agent_credentials.stat().st_mtime
+        except OSError:
+            return
+        if age < CREDENTIAL_REFRESH_AFTER_SECONDS:
+            logger.debug(
+                "agent %s: credentials fresh (age=%.0fs), skipping refresh ping",
+                self.agent_id, age,
+            )
+            return
+        logger.info(
+            "agent %s: credentials %ds old — running refresh ping",
+            self.agent_id, int(age),
+        )
+        self._verify()
+        session = self._ensure_session()
+        try:
+            await session.run_turn(
+                user_message=(
+                    "[puffoagent-refresh-ping] This is an automated "
+                    "token-refresh ping from the daemon. Reply with "
+                    "exactly [SILENT]. Do not use any tools. Do not "
+                    "post to any channel. Do not reference this "
+                    "message again."
+                ),
+                system_prompt="",
+            )
+        except Exception as exc:
+            logger.warning(
+                "agent %s: refresh_ping turn failed: %s",
+                self.agent_id, exc,
+            )
 
     async def aclose(self) -> None:
         if self._session is not None:
