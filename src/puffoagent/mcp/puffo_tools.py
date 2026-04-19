@@ -9,6 +9,12 @@ container (bind-mounted), or inside the SDK adapter's process.
 
 Tools exposed (prefixed ``mcp__puffo__`` when invoked from claude):
 
+    whoami()
+        Return your own bot identity: username (the @-handle others
+        mention you with), user_id, first/last name, nickname, and
+        the AIAgent display_name + team. Useful when you need to
+        introduce yourself or recognise mentions.
+
     send_message(channel, text, root_id="")
         Post to a channel or DM by name/id. Returns the new post id.
 
@@ -358,6 +364,41 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             cached_me["id"] = me["id"]
             cached_me["username"] = me.get("username", "")
         return cached_me
+
+    @mcp.tool()
+    async def whoami() -> str:
+        """Return your own bot identity. Useful when you need to
+        recognise @-mentions of yourself or introduce yourself.
+
+        Reports the Mattermost user record (username, user_id,
+        first_name, last_name, nickname, email) plus your AIAgent
+        record (display_name, team_name) when present. The values
+        come from /api/v4/users/me + /api/v4/aiagents/{user_id}.
+        """
+        async with aiohttp.ClientSession(headers=_headers(cfg.token)) as session:
+            me = await _get(session, cfg.url, "/api/v4/users/me")
+            lines = [
+                f"username:     @{me.get('username', '?')}",
+                f"user_id:      {me.get('id', '?')}",
+                f"first_name:   {me.get('first_name', '') or '(empty)'}",
+                f"last_name:    {me.get('last_name', '') or '(empty)'}",
+                f"nickname:     {me.get('nickname', '') or '(empty)'}",
+                f"email:        {me.get('email', '') or '(empty)'}",
+                f"is_bot:       {me.get('is_bot', False)}",
+            ]
+            try:
+                agent = await _get(
+                    session, cfg.url, f"/api/v4/aiagents/{me['id']}",
+                )
+                lines.extend([
+                    f"display_name: {agent.get('display_name', '') or '(empty)'}",
+                    f"team_name:    {agent.get('team_name', '') or '(empty)'}",
+                ])
+            except Exception:
+                # Bot might not have an AIAgent record (e.g. legacy
+                # bot tokens predating the registry). Skip silently.
+                pass
+            return "\n".join(lines)
 
     @mcp.tool()
     async def send_message(channel: str, text: str, root_id: str = "") -> str:
