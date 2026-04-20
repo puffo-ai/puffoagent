@@ -28,9 +28,17 @@ ProgressCallback = Callable[[str], Awaitable[None]]
 # Refresh when the access token has fewer than this many seconds
 # remaining. Token TTL varies by plan (Pro ~1h, Max ~8h), so we
 # key off the absolute ``expiresAt`` field in .credentials.json
-# rather than a mtime-based heuristic. 15 min gives enough margin
-# to survive one retry before the token actually dies.
-CREDENTIAL_REFRESH_BEFORE_EXPIRY_SECONDS = 15 * 60
+# rather than a mtime-based heuristic.
+#
+# Empirically, Anthropic's OAuth endpoint **refuses to rotate a
+# token that's more than ~10 min from expiry** — it returns the
+# existing token unchanged. Running the refresh one-shot any
+# earlier than that burns an API call and logs a false-positive
+# "expiry didn't advance" warning. Setting the threshold to 5 min
+# lands every refresh attempt safely inside Anthropic's accept
+# window while still leaving enough headroom for the next worker
+# tick (default 10 min) to retry before the token actually dies.
+CREDENTIAL_REFRESH_BEFORE_EXPIRY_SECONDS = 5 * 60
 
 
 # Daemon-wide mutex across every Adapter instance. OAuth uses
