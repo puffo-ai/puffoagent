@@ -641,9 +641,11 @@ def cmd_agent_list(args: argparse.Namespace) -> int:
         print("(no agents registered)")
         return 0
     daemon_alive = is_daemon_alive()
-    fmt = "{id:<20}  {state:<8}  {runtime:<10}  {msgs:>6}  {uptime}"
+    daemon_cfg = DaemonConfig.load()
+    sync_url = (daemon_cfg.server.url or "").rstrip("/").lower()
+    fmt = "{id:<20}  {state:<8}  {runtime:<18}  {msgs:>6}  {uptime}"
     print(fmt.format(id="ID", state="STATE", runtime="RUNTIME", msgs="MSGS", uptime="UPTIME"))
-    print("-" * 72)
+    print("-" * 80)
     for aid in agents:
         try:
             ac = AgentConfig.load(aid)
@@ -668,6 +670,12 @@ def cmd_agent_list(args: argparse.Namespace) -> int:
                 uptime = _format_duration(int(time.time()) - rs.started_at)
             else:
                 uptime = "—"
+        # Mark agents whose mattermost.url disagrees with the daemon's
+        # current sync URL so it's obvious which ones won't get
+        # server-side updates this session.
+        agent_url = (ac.mattermost.url or "").rstrip("/").lower()
+        if sync_url and agent_url and agent_url != sync_url:
+            runtime = f"{runtime} (other-server)"
         print(fmt.format(id=aid, state=ac.state, runtime=runtime, msgs=msgs, uptime=uptime))
     return 0
 

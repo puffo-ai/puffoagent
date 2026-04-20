@@ -78,7 +78,16 @@ async def run_sync_loop(daemon_cfg: DaemonConfig, stop_event: asyncio.Event) -> 
 
 
 async def _sync_once(session: aiohttp.ClientSession, base_url: str) -> None:
-    """One reconciliation pass. Fetch owned agents, diff, write."""
+    """One reconciliation pass. Fetch owned agents, diff, write.
+
+    The sync is **scoped to ``base_url``**: a local agent whose
+    ``mattermost.url`` doesn't match ``base_url`` is treated as
+    belonging to a different server and is left strictly alone —
+    not archived (would lose its files), not updated (would
+    silently overwrite an unrelated config). This way the
+    operator can repoint daemon.yml at a dev server without
+    nuking their production agents on disk.
+    """
     query = "/api/v4/aiagents?owner=me&include_secrets=true"
     async with session.get(base_url + query) as resp:
         if resp.status != 200:
@@ -99,19 +108,55 @@ async def _sync_once(session: aiohttp.ClientSession, base_url: str) -> None:
     remote_ids = set(remote_by_id.keys())
 
     # Agents removed on the server → archive locally so the filesystem
-    # reconciler cancels the worker on its next tick.
+    # reconciler cancels the worker on its next tick. Scope: only
+    # agents whose ``mattermost.url`` matches the current sync server
+    # — leave others on disk untouched.
     for agent_id in local_ids - remote_ids:
         try:
             local = AgentConfig.load(agent_id)
         except Exception:
             continue
-        if _was_created_by_sync(local):
-            logger.info("server sync: archiving %s (removed server-side)", agent_id)
-            _archive_local(agent_id)
+        if not _was_created_by_sync(local):
+            continue
+        if not _url_matches(local.mattermost.url, base_url):
+            logger.debug(
+                "server sync: skipping archive of %s — belongs to %s, not %s",
+                agent_id, local.mattermost.url or "(unset)", base_url,
+            )
+            continue
+        logger.info("server sync: archiving %s (removed server-side)", agent_id)
+        _archive_local(agent_id)
 
     # Agents that exist remotely → create locally or update state.
+    # Don't clobber a same-id local agent that belongs to a *different*
+    # server — that would silently swap one operator's bot token for
+    # another's. Better to log and let the operator rename.
     for agent_id, remote in remote_by_id.items():
+        try:
+            existing = AgentConfig.load(agent_id)
+        except Exception:
+            existing = None
+        if existing is not None and existing.mattermost.url and not _url_matches(
+            existing.mattermost.url, base_url,
+        ):
+            logger.warning(
+                "server sync: skipping %s — local agent already exists "
+                "for a different server (%s); rename the local dir to "
+                "let the new server's agent install",
+                agent_id, existing.mattermost.url,
+            )
+            continue
         _apply_remote(agent_id, remote)
+
+
+def _url_matches(a: str, b: str) -> bool:
+    """Trailing-slash + scheme-tolerant equality for server URLs.
+
+    The daemon stores the URL as the user typed it; the server
+    config sometimes echoes it back with a trailing slash. We
+    normalise both before comparing.
+    """
+    return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
 
 
 def _derive_agent_id(remote: dict) -> str:
