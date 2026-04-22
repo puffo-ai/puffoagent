@@ -47,8 +47,13 @@ from ...mcp.config import (
     mcp_env,
     write_cli_mcp_config,
 )
-from ...portal.state import seed_claude_home
-from .base import Adapter, TurnContext, TurnResult
+from ...portal.state import (
+    link_host_credentials,
+    seed_claude_home,
+    sync_host_mcp_servers,
+    sync_host_skills,
+)
+from .base import Adapter, TurnContext, TurnResult, looks_like_auth_failure
 from .cli_session import AuditLog, ClaudeSession
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,22 @@ PERMISSION_HOOK_TIMEOUT_SECONDS = 300
 # and MCP tools pass through unsurveyed (reads auto-approve in
 # default mode, MCP tools are the agent's talking-to-Mattermost path
 # and shouldn't fire per-call DMs).
-PERMISSION_HOOK_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch"
+PERMISSION_HOOK_FULL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch"
+
+# Narrower matcher for ``acceptEdits`` mode: the user has told
+# claude to auto-accept file edits, so we exclude the edit tools
+# from the proxy and only DM on shell + network. If we kept the
+# full matcher here, setting ``acceptEdits`` would do nothing
+# visible — the DM would still fire on every Edit/Write.
+PERMISSION_HOOK_NON_EDIT_MATCHER = "Bash|WebFetch|WebSearch"
+
+# Substring we look for in existing hook commands to identify
+# puffoagent-registered entries during cleanup. Matching on the
+# module path (rather than the matcher string) means we find our
+# own prior entries across mode switches — switching permission_mode
+# from ``default`` → ``acceptEdits`` would otherwise leak a stale
+# full-matcher entry that shadows the new narrow one.
+_HOOK_COMMAND_MARKER = "puffoagent.hooks.permission"
 
 
 # Claude Code permission modes we pass through to ``--permission-mode``.
@@ -83,6 +103,22 @@ VALID_PERMISSION_MODES = frozenset({
     "dontAsk",
     "bypassPermissions",
 })
+
+
+def _is_puffoagent_hook_entry(entry: object) -> bool:
+    """True if ``entry`` is a PreToolUse hook this adapter previously
+    wrote — identified by the ``puffoagent.hooks.permission`` marker
+    in its command. Used to find and remove our own stale entries
+    during reconciliation without trampling hooks the user or agent
+    added themselves.
+    """
+    if not isinstance(entry, dict):
+        return False
+    hooks = entry.get("hooks") or []
+    return any(
+        isinstance(h, dict) and _HOOK_COMMAND_MARKER in (h.get("command") or "")
+        for h in hooks
+    )
 
 
 def _sanitise_permission_mode(mode: str, agent_id: str) -> str:
@@ -170,15 +206,21 @@ class LocalCLIAdapter(Adapter):
             self._session = None
 
     def _credentials_expires_in_seconds(self) -> int | None:
-        # cli-local agents have their OWN per-agent
-        # ``.credentials.json`` (seeded from host once, then
-        # diverges), so the check targets the agent's own file —
-        # not the host one. Parses ``expiresAt`` directly rather
-        # than relying on mtime (mtime only advances when the file
-        # is REWRITTEN, not when the token is still valid).
-        agent_credentials = self.agent_home_dir / ".claude" / ".credentials.json"
+        # cli-local agents share the HOST's ``.credentials.json`` via
+        # ``link_host_credentials`` — symlink where permitted, periodic
+        # copy fallback elsewhere. The expiry check always targets the
+        # host file so agents see live operator state, matching the
+        # cli-docker bind-mount model. Parses ``expiresAt`` directly
+        # rather than relying on mtime (mtime only advances when the
+        # file is REWRITTEN, not when the token is still valid).
+        #
+        # The link_host_credentials call here doubles as the periodic
+        # re-sync for copy-mode agents — called once per refresh_ping
+        # tick, cheap no-op when symlinked.
+        link_host_credentials(Path.home(), self.agent_home_dir)
+        host_credentials = Path.home() / ".claude" / ".credentials.json"
         try:
-            data = json.loads(agent_credentials.read_text(encoding="utf-8"))
+            data = json.loads(host_credentials.read_text(encoding="utf-8"))
             expires_ms = int(data["claudeAiOauth"]["expiresAt"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -198,8 +240,17 @@ class LocalCLIAdapter(Adapter):
             "HOME": str(self.agent_home_dir),
             "USERPROFILE": str(self.agent_home_dir),
         }
+        # --dangerously-skip-permissions is required here even when
+        # the agent's long-lived session runs on ``default``. In
+        # --print mode claude can't surface permission prompts, so
+        # without a bypass it exits before the API call (rc=1,
+        # iterations:[], input_tokens:0) and no refresh happens.
+        # The docker_cli refresh uses the same flag for the same
+        # reason. Scope is one round-trip with an "ok" prompt — no
+        # tool calls expected.
         cmd = [
-            "claude", "--print", "--max-turns", "1",
+            "claude", "--dangerously-skip-permissions",
+            "--print", "--max-turns", "1",
             "--output-format", "stream-json", "--verbose",
         ]
         if self.model:
@@ -231,19 +282,37 @@ class LocalCLIAdapter(Adapter):
             )
             return
         elapsed = time.time() - started_at
-        if proc.returncode != 0:
-            out_tail = stdout.decode("utf-8", errors="replace").strip()[-400:]
-            err_tail = stderr.decode("utf-8", errors="replace").strip()[-400:]
+        out_text = stdout.decode("utf-8", errors="replace")
+        err_text = stderr.decode("utf-8", errors="replace")
+        # The refresh one-shot doubles as a real inference smoke
+        # test. ``claude auth status`` reporting logged-in isn't
+        # enough — during the 2026-04-21 incident, status said OK
+        # while every API call got 401. Pattern-match the output
+        # to flip auth_healthy; the worker reads that for status
+        # reporting and to stop the bot from producing noisy
+        # replies while the operator re-auths.
+        if looks_like_auth_failure(out_text, err_text):
+            logger.error(
+                "agent %s: refresh one-shot hit an auth failure "
+                "(rc=%d in %.1fs). operator re-auth likely required. "
+                "stdout: %s | stderr: %s",
+                self.agent_id, proc.returncode, elapsed,
+                out_text.strip()[-400:], err_text.strip()[-400:],
+            )
+            self.auth_healthy = False
+        elif proc.returncode != 0:
             logger.warning(
                 "agent %s: refresh one-shot rc=%d in %.1fs | "
                 "stdout: %s | stderr: %s",
-                self.agent_id, proc.returncode, elapsed, out_tail, err_tail,
+                self.agent_id, proc.returncode, elapsed,
+                out_text.strip()[-400:], err_text.strip()[-400:],
             )
         else:
             logger.debug(
                 "agent %s: refresh one-shot rc=0 in %.1fs",
                 self.agent_id, elapsed,
             )
+            self.auth_healthy = True
 
     async def aclose(self) -> None:
         if self._session is not None:
@@ -298,23 +367,44 @@ class LocalCLIAdapter(Adapter):
             "PUFFO_PERMISSION_TIMEOUT": str(PERMISSION_HOOK_TIMEOUT_SECONDS),
         }
 
+    def _hook_matcher_for_mode(self) -> str | None:
+        """Return the PreToolUse hook matcher for this agent's
+        ``permission_mode``, or ``None`` when the mode opts out of
+        proxying entirely.
+
+        Claude Code runs PreToolUse hooks on every matching tool
+        call regardless of ``--permission-mode``, so if we kept the
+        hook registered for every mode the user's choice would be
+        a no-op — ``bypassPermissions`` would still DM the owner on
+        every Bash call. Mapping the matcher to the mode is the
+        only honest way to make the CLI flag mean what it says:
+
+          - ``default``          → full matcher (proxy everything)
+          - ``acceptEdits``      → shell + network only (edits skip the proxy)
+          - ``auto``/``dontAsk``/``bypassPermissions`` → no hook
+        """
+        mode = self.permission_mode
+        if mode == "default":
+            return PERMISSION_HOOK_FULL_MATCHER
+        if mode == "acceptEdits":
+            return PERMISSION_HOOK_NON_EDIT_MATCHER
+        return None
+
     def _write_permission_hook_settings(self) -> None:
-        """Write a project-level ``settings.json`` under the agent's
-        workspace ``.claude/`` directory that registers our
-        PreToolUse hook.
+        """Reconcile the agent's project-level ``settings.json`` so the
+        PreToolUse puffoagent hook matches this agent's
+        ``permission_mode``.
 
         Written to the project level (``workspace/.claude/``), not
         user level (``agent_home_dir/.claude/``), so this file can
         be overwritten wholesale without disturbing settings that
-        were seeded from the host. If the file already exists with
-        a prior puffoagent marker, we rewrite cleanly; any other
-        existing content is preserved and we merge the hook in.
+        were seeded from the host. Existing non-puffoagent hooks
+        are preserved — only the puffoagent entry is added, updated,
+        or removed.
 
         Uses ``default_python_executable()`` as the hook's python
         so the hook runs under the same interpreter that has
-        puffoagent installed. The matcher filters to the tools
-        default mode would normally prompt on — reads bypass the
-        hook entirely.
+        puffoagent installed.
         """
         settings_path = Path(self.claude_dir) / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,37 +419,38 @@ class LocalCLIAdapter(Adapter):
         except (FileNotFoundError, ValueError, OSError):
             existing = {}
 
-        hook_block = {
-            "matcher": PERMISSION_HOOK_TOOL_MATCHER,
-            "hooks": [{
-                "type": "command",
-                "command": (
-                    f'"{default_python_executable()}" '
-                    f"-m puffoagent.hooks.permission"
-                ),
-                "timeout": PERMISSION_HOOK_TIMEOUT_SECONDS + 60,
-            }],
-        }
-
         hooks_cfg = existing.get("hooks") or {}
         pretool = hooks_cfg.get("PreToolUse") or []
-        # Replace any previous puffoagent entry (keyed by matcher
-        # string) so re-running the worker never stacks duplicates.
+        # Drop any previous puffoagent entry, keyed by the command
+        # signature so we catch entries across matcher changes
+        # (e.g. switching permission_mode from default → acceptEdits).
         pretool = [
             entry for entry in pretool
-            if not (
-                isinstance(entry, dict)
-                and entry.get("matcher") == PERMISSION_HOOK_TOOL_MATCHER
-                and any(
-                    "puffoagent.hooks.permission" in (h.get("command") or "")
-                    for h in (entry.get("hooks") or [])
-                    if isinstance(h, dict)
-                )
-            )
+            if not _is_puffoagent_hook_entry(entry)
         ]
-        pretool.append(hook_block)
-        hooks_cfg["PreToolUse"] = pretool
-        existing["hooks"] = hooks_cfg
+
+        matcher = self._hook_matcher_for_mode()
+        if matcher is not None:
+            pretool.append({
+                "matcher": matcher,
+                "hooks": [{
+                    "type": "command",
+                    "command": (
+                        f'"{default_python_executable()}" '
+                        f"-m puffoagent.hooks.permission"
+                    ),
+                    "timeout": PERMISSION_HOOK_TIMEOUT_SECONDS + 60,
+                }],
+            })
+
+        if pretool:
+            hooks_cfg["PreToolUse"] = pretool
+        elif "PreToolUse" in hooks_cfg:
+            del hooks_cfg["PreToolUse"]
+        if hooks_cfg:
+            existing["hooks"] = hooks_cfg
+        elif "hooks" in existing:
+            del existing["hooks"]
 
         tmp = settings_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
@@ -404,6 +495,7 @@ class LocalCLIAdapter(Adapter):
             workspace=self.workspace_dir,
             team=self.team,
             owner_username=self.owner_username,
+            runtime_kind="cli-local",
         )
         write_cli_mcp_config(
             self.mcp_config_file,
@@ -424,9 +516,10 @@ class LocalCLIAdapter(Adapter):
             )
         # Seed this agent's per-agent virtual $HOME from the
         # operator's real $HOME on first use. Isolated per agent —
-        # one-time `claude login` on the host covers every cli-local
-        # agent. Covers .claude/.credentials.json,
-        # .claude/settings.json, and sibling .claude.json.
+        # covers .claude/settings.json and sibling .claude.json.
+        # Credentials are handled separately (link_host_credentials
+        # below) so every agent tracks the operator's live OAuth
+        # state instead of diverging over time.
         host_home = Path.home()
         self.agent_home_dir.mkdir(parents=True, exist_ok=True)
         seeded = seed_claude_home(host_home, self.agent_home_dir)
@@ -434,6 +527,39 @@ class LocalCLIAdapter(Adapter):
             logger.info(
                 "agent %s: seeded per-agent virtual $HOME at %s from %s",
                 self.agent_id, self.agent_home_dir, host_home,
+            )
+        # Shared credentials: point agent's .credentials.json at the
+        # host's live file so `claude login` on the host (or any
+        # refresh by any cli-local agent) is visible to every agent
+        # on the next read. Symlink preferred; falls back to a copy
+        # on systems where symlinks aren't permitted (re-synced on
+        # every refresh_ping tick via _credentials_expires_in_seconds).
+        mode = link_host_credentials(host_home, self.agent_home_dir)
+        logger.info(
+            "agent %s: shared host credentials (%s)",
+            self.agent_id, mode,
+        )
+        # One-way sync of host-installed user-level skills and MCP
+        # registrations into the per-agent virtual $HOME. Runs every
+        # worker start so host edits propagate without recreating
+        # the agent. The unreachable-command list returned by
+        # sync_host_mcp_servers is deliberately ignored here: on
+        # cli-local the agent subprocess runs on the host, so
+        # absolute paths like ``/Users/…`` / ``C:\…`` do resolve.
+        # (docker_cli.py warns on them; local_cli has no such
+        # concern.)
+        skill_count = sync_host_skills(host_home, self.agent_home_dir)
+        if skill_count:
+            logger.info(
+                "agent %s: synced %d host skill(s) into %s",
+                self.agent_id, skill_count,
+                self.agent_home_dir / ".claude" / "skills",
+            )
+        merged_mcp, _ = sync_host_mcp_servers(host_home, self.agent_home_dir)
+        if merged_mcp:
+            logger.info(
+                "agent %s: merged %d host MCP server registration(s) "
+                "into per-agent .claude.json", self.agent_id, merged_mcp,
             )
         agent_claude = self.agent_home_dir / ".claude"
         if not (agent_claude / ".credentials.json").exists():

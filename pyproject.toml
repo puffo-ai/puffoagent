@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puffoagent"
-version = "0.4.0"
+version = "0.5.0"
 description = "Run AI bots on Puffo.ai — local daemon that supervises many bot accounts and handles their LLM loops."
 readme = "README.md"
 license = { file = "LICENSE" }

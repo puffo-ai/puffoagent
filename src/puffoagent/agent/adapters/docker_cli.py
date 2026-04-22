@@ -67,8 +67,12 @@ from ...mcp.config import (
     mcp_env,
     write_cli_mcp_config,
 )
-from ...portal.state import seed_claude_home
-from .base import Adapter, TurnContext, TurnResult
+from ...portal.state import (
+    seed_claude_home,
+    sync_host_mcp_servers,
+    sync_host_skills,
+)
+from .base import Adapter, TurnContext, TurnResult, looks_like_auth_failure
 from .cli_session import AuditLog, ClaudeSession
 
 
@@ -79,7 +83,7 @@ logger = logging.getLogger(__name__)
 # a rebuild without the user having to remember to prune the old
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
-DEFAULT_IMAGE = "puffo/agent-runtime:v5"
+DEFAULT_IMAGE = "puffo/agent-runtime:v6"
 
 # Timeout for the refresh one-shot. A cold claude + OAuth refresh
 # round-trip + one-turn API call normally lands in 5-15s, but can
@@ -118,8 +122,13 @@ RUN npm install -g @anthropic-ai/claude-code
 # required on Debian bookworm — PEP 668 marks /usr as externally
 # managed. Installing system-wide is acceptable here: the container
 # is single-purpose and disposable.
+#
+# ``uv`` ships the ``uvx`` launcher — counterpart of ``npx`` for
+# Python-packaged MCP servers. Having both on PATH lets agents
+# register any stdio MCP via install_mcp_server without needing
+# a per-server pip/npm install step.
 RUN pip3 install --break-system-packages --no-cache-dir \\
-        "mcp>=1.0" "aiohttp>=3.9"
+        "mcp>=1.0" "aiohttp>=3.9" "uv>=0.5"
 
 RUN useradd -m -u 2000 -s /bin/bash agent
 USER agent
@@ -274,19 +283,32 @@ class DockerCLIAdapter(Adapter):
             )
             return
         elapsed = time.time() - started_at
-        if rc != 0:
-            out_tail = stdout.decode("utf-8", errors="replace").strip()[-400:]
-            err_tail = stderr.decode("utf-8", errors="replace").strip()[-400:]
+        out_text = stdout.decode("utf-8", errors="replace")
+        err_text = stderr.decode("utf-8", errors="replace")
+        # Doubles as an inference smoke test — see base adapter's
+        # looks_like_auth_failure and the 2026-04-21 incident report.
+        if looks_like_auth_failure(out_text, err_text):
+            logger.error(
+                "agent %s: refresh one-shot hit an auth failure "
+                "(rc=%d in %.1fs). operator re-auth likely required. "
+                "stdout: %s | stderr: %s",
+                self.agent_id, rc, elapsed,
+                out_text.strip()[-400:], err_text.strip()[-400:],
+            )
+            self.auth_healthy = False
+        elif rc != 0:
             logger.warning(
                 "agent %s: refresh one-shot rc=%d in %.1fs | "
                 "stdout: %s | stderr: %s",
-                self.agent_id, rc, elapsed, out_tail, err_tail,
+                self.agent_id, rc, elapsed,
+                out_text.strip()[-400:], err_text.strip()[-400:],
             )
         else:
             logger.debug(
                 "agent %s: refresh one-shot rc=0 in %.1fs",
                 self.agent_id, elapsed,
             )
+            self.auth_healthy = True
 
     async def aclose(self) -> None:
         if self._session is not None:
@@ -351,6 +373,7 @@ class DockerCLIAdapter(Adapter):
             workspace="/workspace",  # inside the container
             team=self.team,
             owner_username=self.owner_username,
+            runtime_kind="cli-docker",
         )
         # Write to workspace/.puffoagent/mcp-config.json on the host;
         # the container sees the same file at
@@ -389,6 +412,34 @@ class DockerCLIAdapter(Adapter):
                 logger.info(
                     "agent %s: seeded per-agent virtual $HOME at %s from %s",
                     self.agent_id, self.agent_home_dir, host_home,
+                )
+            # One-way sync of host-installed user-level skills and MCP
+            # registrations into the per-agent virtual $HOME. Agent-
+            # installed skills/MCPs stay in the per-agent dir; nothing
+            # flows back to the host. Runs every container start so
+            # host edits propagate without a daemon restart.
+            skill_count = sync_host_skills(host_home, self.agent_home_dir)
+            if skill_count:
+                logger.info(
+                    "agent %s: synced %d host skill(s) into %s",
+                    self.agent_id, skill_count,
+                    self.agent_home_dir / ".claude" / "skills",
+                )
+            merged_mcp, unreachable = sync_host_mcp_servers(
+                host_home, self.agent_home_dir,
+            )
+            if merged_mcp:
+                logger.info(
+                    "agent %s: merged %d host MCP server registration(s) "
+                    "into per-agent .claude.json", self.agent_id, merged_mcp,
+                )
+            for name, cmd in unreachable:
+                logger.warning(
+                    "agent %s: host MCP %r command %r looks host-local and "
+                    "won't resolve inside the container. Install the "
+                    "binary in the image or bind-mount it explicitly, "
+                    "otherwise this MCP will fail on first use.",
+                    self.agent_id, name, cmd,
                 )
             if not (host_home / ".claude" / ".credentials.json").exists():
                 logger.warning(

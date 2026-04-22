@@ -33,6 +33,7 @@ from .state import (
     RuntimeState,
     TriggerRules,
     agent_dir,
+    agent_home_dir,
     agent_yml_path,
     agents_dir,
     archived_dir,
@@ -42,6 +43,7 @@ from .state import (
     home_dir,
     is_daemon_alive,
     is_valid_agent_id,
+    link_host_credentials,
     read_daemon_pid,
 )
 
@@ -565,7 +567,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             ac = AgentConfig.load(aid)
             rs = RuntimeState.load(aid)
             status = rs.status if rs else "unknown"
-            print(f"  - {aid}  state={ac.state}  runtime={status}")
+            health = rs.health if rs else "unknown"
+            # Only surface health when it's not "ok" — keeps the
+            # happy-path listing tight while making auth_failed
+            # jump out in a quick scan.
+            health_suffix = f"  health={health}" if health not in ("ok", "unknown") else ""
+            print(f"  - {aid}  state={ac.state}  runtime={status}{health_suffix}")
         except Exception as exc:
             print(f"  - {aid}  (error: {exc})")
     return 0
@@ -676,6 +683,11 @@ def cmd_agent_list(args: argparse.Namespace) -> int:
         agent_url = (ac.mattermost.url or "").rstrip("/").lower()
         if sync_url and agent_url and agent_url != sync_url:
             runtime = f"{runtime} (other-server)"
+        # Surface auth_failed alongside the lifecycle status so one
+        # glance at ``puffoagent agent list`` tells the operator
+        # which agents need re-auth. "ok" and "unknown" stay silent.
+        if rs is not None and rs.health == "auth_failed":
+            runtime = f"{runtime} [auth_failed]"
         print(fmt.format(id=aid, state=ac.state, runtime=runtime, msgs=msgs, uptime=uptime))
     return 0
 
@@ -706,6 +718,7 @@ def cmd_agent_show(args: argparse.Namespace) -> int:
     if rs is not None:
         print("status:")
         print(f"  status:        {rs.status}")
+        print(f"  health:        {rs.health}")
         print(f"  msg_count:     {rs.msg_count}")
         print(f"  last_event_at: {_format_ts(rs.last_event_at)}")
         print(f"  updated_at:    {_format_ts(rs.updated_at)}")
@@ -720,6 +733,155 @@ def cmd_agent_pause(args: argparse.Namespace) -> int:
 
 def cmd_agent_resume(args: argparse.Namespace) -> int:
     return _set_agent_state(args.id, "running")
+
+
+def _summarise_credentials(path: Path) -> str:
+    """Human-readable one-liner about a ``.credentials.json`` file:
+    mtime, expiresAt, presence of access + refresh tokens, scopes.
+    Used by the ``refresh-ping`` diagnostic.
+    """
+    import json as _json
+    if not path.exists():
+        return "not present"
+    try:
+        st = path.stat()
+    except OSError as exc:
+        return f"stat failed: {exc}"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"size={st.st_size}B mtime={_format_ts(int(st.st_mtime))} parse-error: {exc}"
+    oauth = data.get("claudeAiOauth") or {}
+    expires_ms = oauth.get("expiresAt")
+    if isinstance(expires_ms, (int, float)):
+        expires_in = int(expires_ms / 1000 - time.time())
+        expires_at = _format_ts(int(expires_ms / 1000))
+        expiry_info = f"expiresAt={expires_at} ({expires_in:+d}s from now)"
+    else:
+        expiry_info = "expiresAt=(missing)"
+    has_access = bool(oauth.get("accessToken"))
+    has_refresh = bool(oauth.get("refreshToken"))
+    scopes = oauth.get("scopes") or []
+    return (
+        f"mtime={_format_ts(int(st.st_mtime))} {expiry_info} "
+        f"accessToken={'yes' if has_access else 'no'} "
+        f"refreshToken={'yes' if has_refresh else 'no'} "
+        f"scopes={scopes!r}"
+    )
+
+
+def cmd_agent_refresh_ping(args: argparse.Namespace) -> int:
+    """Run the OAuth refresh one-shot against a cli-local agent and
+    dump everything we can see — credentials before + after, full
+    subprocess stdout/stderr — so an operator can diagnose refresh
+    failures reproducibly.
+
+    Side effect: whatever the one-shot itself does. Normally this is
+    a token rotation that rewrites the agent's ``.credentials.json``;
+    if OAuth is unhealthy (expired refresh token, stale refresh chain),
+    it's a single failed round-trip that we surface in full.
+    """
+    agent_id = args.id
+    if not agent_yml_path(agent_id).exists():
+        print(f"error: agent {agent_id!r} not found", file=sys.stderr)
+        return 2
+    cfg = AgentConfig.load(agent_id)
+    if cfg.runtime.kind != "cli-local":
+        print(
+            f"error: refresh-ping only supports cli-local right now "
+            f"(agent {agent_id!r} is {cfg.runtime.kind!r}). cli-docker "
+            "has its own path via `docker exec` that isn't wired here yet.",
+            file=sys.stderr,
+        )
+        return 2
+
+    home_override = agent_home_dir(agent_id)
+    agent_creds = home_override / ".claude" / ".credentials.json"
+    host_creds = Path.home() / ".claude" / ".credentials.json"
+    workspace = Path(cfg.resolve_workspace_dir())
+
+    print(f"agent: {agent_id}  runtime: {cfg.runtime.kind}  model: {cfg.runtime.model or '(default)'}")
+    print(f"agent HOME override: {home_override}")
+    print(f"workspace:           {workspace}")
+    print()
+    print("Before link:")
+    print(f"  agent {agent_creds}")
+    print(f"        {_summarise_credentials(agent_creds)}")
+    print(f"  host  {host_creds}")
+    print(f"        {_summarise_credentials(host_creds)}")
+    print()
+
+    # Mirror what LocalCLIAdapter._verify() does in production so the
+    # diagnostic reflects the same starting conditions as a real
+    # refresh ping.
+    link_mode = link_host_credentials(Path.home(), home_override)
+    print(f"link_host_credentials -> {link_mode}")
+    print("After link:")
+    print(f"  agent {agent_creds}")
+    print(f"        {_summarise_credentials(agent_creds)}")
+    print()
+
+    if shutil.which("claude") is None:
+        print("error: claude binary not on PATH", file=sys.stderr)
+        return 2
+
+    cmd = [
+        "claude", "--dangerously-skip-permissions",
+        "--print", "--max-turns", "1",
+        "--output-format", "stream-json", "--verbose",
+    ]
+    if cfg.runtime.model:
+        cmd.extend(["--model", cfg.runtime.model])
+    cmd.append("ok")
+
+    env = {
+        **os.environ,
+        "HOME": str(home_override),
+        "USERPROFILE": str(home_override),
+    }
+
+    print(f"running: {' '.join(cmd)}")
+    print(f"  cwd={workspace}")
+    print(f"  HOME={home_override}  USERPROFILE={home_override}")
+    print()
+
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(workspace),
+            env=env,
+            capture_output=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - started
+        print(f"timed out after {elapsed:.1f}s", file=sys.stderr)
+        if exc.stdout:
+            print("--- stdout ---")
+            print(exc.stdout.decode("utf-8", errors="replace"))
+        if exc.stderr:
+            print("--- stderr ---")
+            print(exc.stderr.decode("utf-8", errors="replace"))
+        return 3
+    elapsed = time.time() - started
+
+    print(f"rc={proc.returncode}  elapsed={elapsed:.1f}s")
+    print()
+    print("--- stdout ---")
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    print(stdout or "(empty)")
+    print()
+    print("--- stderr ---")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    print(stderr or "(empty)")
+    print()
+    print("After:")
+    print(f"  agent {agent_creds}")
+    print(f"        {_summarise_credentials(agent_creds)}")
+    print(f"  host  {host_creds}")
+    print(f"        {_summarise_credentials(host_creds)}")
+    return 0
 
 
 def _set_agent_state(agent_id: str, new_state: str) -> int:
@@ -1152,6 +1314,17 @@ def build_parser() -> argparse.ArgumentParser:
     resume = agent_sub.add_parser("resume", help="Resume a paused agent")
     resume.add_argument("id")
     resume.set_defaults(func=cmd_agent_resume)
+
+    refresh_ping = agent_sub.add_parser(
+        "refresh-ping",
+        help=(
+            "Diagnostic: run the OAuth refresh one-shot against a "
+            "cli-local agent and print credentials before/after + "
+            "full subprocess output."
+        ),
+    )
+    refresh_ping.add_argument("id")
+    refresh_ping.set_defaults(func=cmd_agent_refresh_ping)
 
     runtime = agent_sub.add_parser(
         "runtime",

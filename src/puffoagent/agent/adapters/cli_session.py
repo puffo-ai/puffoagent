@@ -64,9 +64,17 @@ _AUTH_ERROR_MARKERS = (
     "invalid_grant",
     "authentication failed",
     "credentials expired",
+    # Patterns observed in the 2026-04-21 Core 3 freeze incident,
+    # where stale OAuth state made claude emit raw API errors as
+    # its reply. Added here so the retry loop catches them AND so
+    # retry exhaustion results in a silent reply rather than
+    # "Failed to authenticate. API Error: 401..." leaking into
+    # a public channel.
+    "failed to authenticate",
+    "api error: 401",
+    "invalid authentication credentials",
+    '"type":"authentication_error"',
 )
-
-AUTH_ERROR_REPLY = "Agent Token Refreshing Needed"
 
 # Backoffs between retries when an auth-error reply is detected.
 # 5 total attempts (initial + 4 retries) for a worst case of ~45s
@@ -143,6 +151,19 @@ def _truncate(v):
 INIT_TIMEOUT_SECONDS = 10.0
 
 
+# Buffer size for the asyncio StreamReader wrapping the claude
+# subprocess's stdout. The asyncio default is 64 KiB — one
+# newline-delimited stream-json event emitted by Opus-class models
+# (verbose metadata + long tool results + large assistant blocks)
+# routinely exceeds that, and when it does ``readline()`` raises
+# ``LimitOverrunError``, the turn wedges, and the UI shows the
+# agent "still thinking" indefinitely. See the 2026-04-21 Core 3
+# freeze incident report for the failure this prevents. 16 MiB is
+# comfortably larger than any single event we've seen in the wild
+# while still bounding memory per agent.
+STREAM_READER_LIMIT_BYTES = 16 * 1024 * 1024
+
+
 class _ResumeFailed(Exception):
     """The subprocess exited before emitting an init event — almost
     always because ``--resume <id>`` was passed with a stale session
@@ -199,7 +220,7 @@ class ClaudeSession:
             # cause is a transient — multi-agent rotating-refresh-
             # token race or a 5xx blip on Anthropic's auth path —
             # so a few short backoffs almost always rescue the turn
-            # without the user ever seeing AUTH_ERROR_REPLY.
+            # without the user ever seeing a degraded reply.
             attempts = len(AUTH_RETRY_BACKOFFS_SECONDS) + 1
             last_result: TurnResult | None = None
             for attempt in range(attempts):
@@ -227,11 +248,19 @@ class ClaudeSession:
                         of=attempts,
                         reply=result.reply,
                     )
-            # All attempts exhausted — surface the short message.
+            # All attempts exhausted. We used to surface a visible
+            # "Agent Token Refreshing Needed" reply, but that leaked
+            # operator-speak into public channels (see 2026-04-21
+            # freeze incident report). Keep the detailed error on the
+            # operator side — ERROR log + audit + metadata — and
+            # return an empty reply so ``core.handle_message`` maps
+            # it to "don't post". The operator still sees the state
+            # via logs and via runtime health (set by the worker
+            # from ``metadata['auth_failed']``).
             logger.error(
                 "agent %s: auth error persisted across %d attempts; "
-                "returning %r. last reply: %s",
-                self.agent_id, attempts, AUTH_ERROR_REPLY,
+                "suppressing reply. last reply: %s",
+                self.agent_id, attempts,
                 (last_result.reply if last_result else "")[:500],
             )
             if self.audit is not None:
@@ -240,15 +269,17 @@ class ClaudeSession:
                     attempts=attempts,
                     reply=last_result.reply if last_result else "",
                 )
-            if last_result is None:
-                return TurnResult(reply=AUTH_ERROR_REPLY)
-            return TurnResult(
-                reply=AUTH_ERROR_REPLY,
-                input_tokens=last_result.input_tokens,
-                output_tokens=last_result.output_tokens,
-                tool_calls=last_result.tool_calls,
-                metadata=last_result.metadata,
-            )
+            md: dict = {"auth_failed": True, "attempts": attempts}
+            if last_result is not None:
+                md = {**last_result.metadata, **md}
+                return TurnResult(
+                    reply="",
+                    input_tokens=last_result.input_tokens,
+                    output_tokens=last_result.output_tokens,
+                    tool_calls=last_result.tool_calls,
+                    metadata=md,
+                )
+            return TurnResult(reply="", metadata=md)
 
     async def warm(self, system_prompt: str) -> None:
         """Spawn the claude subprocess without running a turn so the
@@ -351,6 +382,7 @@ class ClaudeSession:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
             env=self.env,
+            limit=STREAM_READER_LIMIT_BYTES,
         )
         if self.audit is not None:
             self.audit.write(
@@ -423,6 +455,31 @@ class ClaudeSession:
         except Exception:
             return
 
+    async def _handle_stream_failure(self, phase: str, exc) -> None:
+        """Shared cleanup when the stream-json protocol goes sideways
+        mid-turn (oversize line, broken pipe, subprocess EOF). Logs,
+        audits, and kills the subprocess so ``_ensure_running`` will
+        respawn a fresh one on the next turn. Callers are expected
+        to return a silent empty reply so the shell doesn't post a
+        runtime-flavoured message to the channel.
+        """
+        err_type = type(exc).__name__ if isinstance(exc, BaseException) else "str"
+        err_str = str(exc)
+        logger.error(
+            "agent %s: claude stream failure in %s (%s: %s) — "
+            "killing subprocess; next turn will respawn",
+            self.agent_id, phase, err_type, err_str,
+        )
+        if self.audit is not None:
+            self.audit.write(
+                "session.stream_error",
+                phase=phase,
+                error_type=err_type,
+                error=err_str,
+                action="respawned_claude_subprocess",
+            )
+        await self._kill_proc()
+
     async def _kill_proc(self) -> None:
         if self._proc is None:
             return
@@ -469,10 +526,13 @@ class ClaudeSession:
         try:
             await self._proc.stdin.drain()
         except (ConnectionResetError, BrokenPipeError) as exc:
-            raise RuntimeError(
-                f"agent {self.agent_id}: claude subprocess died before we could "
-                f"send the turn ({exc})"
-            ) from exc
+            # Subprocess died before we could hand it the turn.
+            # Handle the same way as a mid-read failure: kill, audit,
+            # surface a silent empty reply so the shell doesn't post
+            # a runtime error into the channel. Next turn will
+            # respawn via _ensure_running.
+            await self._handle_stream_failure("stdin_drain", exc)
+            return TurnResult(reply="", metadata={"stream_error": "stdin_drain"})
 
         reply_parts: list[str] = []
         tool_calls = 0
@@ -481,12 +541,30 @@ class ClaudeSession:
         event_types_seen: list[str] = []
 
         while True:
-            line = await self._proc.stdout.readline()
+            try:
+                line = await self._proc.stdout.readline()
+            except (asyncio.LimitOverrunError, ValueError) as exc:
+                # asyncio wraps LimitOverrunError in ValueError when
+                # raising out of readline(); catch both. This is the
+                # exact path the 2026-04-21 Core 3 freeze incident
+                # hit — a single stream-json event larger than the
+                # StreamReader buffer. We widened the buffer to 16
+                # MiB at spawn time, but if a future event still
+                # exceeds that we recover rather than wedge.
+                await self._handle_stream_failure("readline_limit", exc)
+                return TurnResult(reply="", metadata={"stream_error": "readline_limit"})
+            except (ConnectionResetError, BrokenPipeError) as exc:
+                await self._handle_stream_failure("readline_pipe", exc)
+                return TurnResult(reply="", metadata={"stream_error": "readline_pipe"})
             if not line:
                 rc = await self._proc.wait()
-                raise RuntimeError(
-                    f"agent {self.agent_id}: claude subprocess died mid-turn (rc={rc})"
-                )
+                # Subprocess died mid-turn. Historically we raised and
+                # let the worker surface a generic handle_message
+                # error; now we audit, trigger respawn on next turn,
+                # and return a silent empty reply so users don't see
+                # a traceback-flavoured bot message.
+                await self._handle_stream_failure("eof_mid_turn", f"rc={rc}")
+                return TurnResult(reply="", metadata={"stream_error": "eof_mid_turn"})
             event = _parse_event(line)
             if event is None:
                 continue

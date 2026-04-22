@@ -33,6 +33,13 @@ PUFFO_TOOL_NAMES = (
     "get_post",
     "get_user_info",
     "reload_system_prompt",
+    "install_skill",
+    "uninstall_skill",
+    "list_skills",
+    "install_mcp_server",
+    "uninstall_mcp_server",
+    "list_mcp_servers",
+    "refresh",
     "approve_permission",
 )
 PUFFO_TOOL_FQNS = tuple(f"mcp__{MCP_SERVER_NAME}__{t}" for t in PUFFO_TOOL_NAMES)
@@ -51,9 +58,18 @@ def mcp_env(
     team: str = "",
     owner_username: str = "",
     permission_timeout_seconds: float = 300.0,
+    runtime_kind: str = "",
 ) -> dict[str, str]:
     """Env dict to pass to the MCP subprocess. Puts secrets in env
-    rather than argv so they don't appear in process listings."""
+    rather than argv so they don't appear in process listings.
+
+    ``runtime_kind`` propagates the adapter kind (``cli-local`` /
+    ``cli-docker`` / ``sdk``) so the MCP server can make
+    runtime-aware decisions — e.g., ``install_mcp_server`` rejects
+    host-local command paths inside ``cli-docker`` (they won't
+    resolve in the container) but accepts them under ``cli-local``
+    where the agent runs on the host.
+    """
     env: dict[str, str] = {
         "PUFFO_AGENT_ID": agent_id,
         "PUFFO_URL": url,
@@ -65,6 +81,8 @@ def mcp_env(
         env["PUFFO_TEAM"] = team
     if owner_username:
         env["PUFFO_OWNER_USERNAME"] = owner_username
+    if runtime_kind:
+        env["PUFFO_RUNTIME_KIND"] = runtime_kind
     return env
 
 
@@ -91,6 +109,7 @@ def stdio_sdk_config(
                 agent_id=agent_id, url=url, token=token, workspace=workspace,
                 team=team, owner_username=owner_username,
                 permission_timeout_seconds=permission_timeout_seconds,
+                runtime_kind="sdk",
             ),
         }
     }

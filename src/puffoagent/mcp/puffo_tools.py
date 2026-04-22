@@ -50,6 +50,26 @@ Tools exposed (prefixed ``mcp__puffo__`` when invoked from claude):
         restart your claude subprocess so fresh edits to your
         profile/memory/CLAUDE.md take effect on your next message.
 
+    install_skill(name, content) / uninstall_skill(name) / list_skills()
+        Manage project-scope skills in ``<workspace>/.claude/skills/``.
+        install drops a ``SKILL.md`` + ``agent-installed.md`` marker;
+        uninstall refuses to touch host-synced skills; list tags each
+        entry ``[system]`` or ``[agent]``. Call ``refresh()`` after
+        installs to pick them up.
+
+    install_mcp_server(name, command, args, env)
+    uninstall_mcp_server(name) / list_mcp_servers()
+        Manage project-scope MCP servers in ``<workspace>/.mcp.json``.
+        Host-local command paths are rejected. System MCPs (from the
+        operator's ``~/.claude.json``) can't be removed here. Call
+        ``refresh()`` after installs.
+
+    refresh(model=None)
+        Respawn your claude subprocess (via ``--resume``, history
+        preserved) so new skills/MCPs are discovered. Optional
+        ``model`` argument switches runtime model. Lighter than
+        ``reload_system_prompt`` — does NOT regenerate CLAUDE.md.
+
     approve_permission(tool_name, input)
         (cli-local permission proxy.) Post a permission request to the
         owner's DM and poll for a reply ('y'/'n'/'approve'/'deny') up
@@ -74,9 +94,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -91,6 +113,259 @@ from mcp.server.fastmcp import FastMCP
 _PERMALINK_RE = re.compile(r"/pl/([a-z0-9]{26})(?:[/?#].*)?$")
 # Bare post id: exactly 26 a-z0-9 chars.
 _POST_ID_RE = re.compile(r"^[a-z0-9]{26}$")
+
+# Skill slug: lowercase letters, digits, hyphens; can't lead with a
+# hyphen; max 64 chars. Matches Claude Code's documented constraint.
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# Provenance markers dropped inside every skill directory. Claude
+# Code only executes ``SKILL.md`` as a skill entrypoint, so siblings
+# are inert unless referenced from SKILL.md — safe to use as tags.
+AGENT_INSTALLED_MARKER = "agent-installed.md"
+HOST_SYNCED_MARKER = "host-synced.md"
+_AGENT_INSTALLED_BODY = (
+    "This skill was installed by the agent via the install_skill "
+    "MCP tool. It lives at project scope and survives host syncs.\n"
+)
+
+# Command-path prefixes that won't resolve inside a puffoagent
+# runtime container. Duplicated from ``puffoagent.portal.state`` so
+# this module stays importable with only ``aiohttp`` + ``mcp`` — it
+# runs standalone on the host (cli-local) and bind-mounted inside
+# the cli-docker container, neither of which has puffoagent itself
+# on the Python path.
+_HOST_LOCAL_PREFIXES = ("/Users/", "/tmp/", "/var/folders/")
+
+
+def _looks_host_local_command(command: str) -> bool:
+    """Return True when ``command`` points at a host-specific path
+    that won't exist inside a puffoagent-runtime container. Used to
+    reject MCP server registrations whose command would fail to
+    spawn. Bare program names (``npx``, ``uvx``, ``python3``) pass
+    through because they're expected to resolve on PATH.
+    """
+    if not command:
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", command) or "\\" in command:
+        return True
+    if command.startswith("/home/") and not command.startswith("/home/agent/"):
+        return True
+    return any(command.startswith(p) for p in _HOST_LOCAL_PREFIXES)
+
+
+# ── Skill / MCP install helpers ─────────────────────────────────────────────
+#
+# Pure-Path implementations of the install / uninstall / list /
+# refresh MCP tools. Kept at module level (not inside build_server)
+# so tests can drive them directly without standing up a FastMCP
+# server. The @mcp.tool() wrappers below are thin shims that turn
+# results into human-readable strings.
+
+
+def _workspace_skills_dir(workspace: Path) -> Path:
+    """Project-scope skills dir for an agent — what install_skill
+    writes. Claude Code also reads this alongside user-scope skills
+    at session start."""
+    return workspace / ".claude" / "skills"
+
+
+def _system_skills_dir(home: Path) -> Path:
+    """User-scope skills dir — operator-managed, host-synced."""
+    return home / ".claude" / "skills"
+
+
+def _workspace_mcp_path(workspace: Path) -> Path:
+    """Project-scope MCP config. Claude Code's documented project-
+    scope filename is ``.mcp.json`` at the workspace root —
+    https://code.claude.com/docs/en/mcp."""
+    return workspace / ".mcp.json"
+
+
+def _system_claude_json_path(home: Path) -> Path:
+    """User-scope claude config — contains system-scope MCPs."""
+    return home / ".claude.json"
+
+
+def _read_json_or_empty(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"existing config at {path} is malformed JSON: {exc}. "
+            "fix or delete the file before retrying."
+        ) from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _install_skill(workspace: Path, name: str, content: str) -> Path:
+    if not _SKILL_NAME_RE.match(name or ""):
+        raise RuntimeError(
+            f"invalid skill name {name!r}: must be lowercase letters, "
+            "digits, and hyphens (max 64 chars, can't start with a hyphen)"
+        )
+    if not content or not content.strip():
+        raise RuntimeError("skill content is empty")
+    dst = _workspace_skills_dir(workspace) / name
+    dst.mkdir(parents=True, exist_ok=True)
+    (dst / "SKILL.md").write_text(content, encoding="utf-8")
+    (dst / AGENT_INSTALLED_MARKER).write_text(
+        _AGENT_INSTALLED_BODY, encoding="utf-8",
+    )
+    return dst
+
+
+def _uninstall_skill(workspace: Path, name: str) -> Path:
+    if not _SKILL_NAME_RE.match(name or ""):
+        raise RuntimeError(f"invalid skill name {name!r}")
+    dst = _workspace_skills_dir(workspace) / name
+    if not dst.is_dir():
+        raise RuntimeError(
+            f"no agent-installed skill {name!r} at {dst}. "
+            "use list_skills() to see what's available."
+        )
+    if not (dst / AGENT_INSTALLED_MARKER).exists():
+        raise RuntimeError(
+            f"skill {name!r} at {dst} has no {AGENT_INSTALLED_MARKER} "
+            "marker — refusing to delete to avoid clobbering "
+            "operator-managed content."
+        )
+    shutil.rmtree(dst)
+    return dst
+
+
+def _list_skills(workspace: Path, home: Path) -> list[tuple[str, str]]:
+    """Return ``[(scope, name), ...]`` sorted by scope then name,
+    where scope is either ``"system"`` or ``"agent"``.
+    """
+    out: list[tuple[str, str]] = []
+    sysroot = _system_skills_dir(home)
+    if sysroot.is_dir():
+        for d in sorted(sysroot.iterdir()):
+            if d.is_dir() and (d / "SKILL.md").exists():
+                out.append(("system", d.name))
+    agentroot = _workspace_skills_dir(workspace)
+    if agentroot.is_dir():
+        for d in sorted(agentroot.iterdir()):
+            if d.is_dir() and (d / "SKILL.md").exists():
+                out.append(("agent", d.name))
+    return out
+
+
+def _install_mcp_server(
+    workspace: Path,
+    name: str,
+    command: str,
+    args: Optional[list[str]] = None,
+    env: Optional[dict[str, str]] = None,
+    check_host_local: bool = True,
+) -> Path:
+    """Install a project-scope MCP server.
+
+    ``check_host_local`` is ``True`` for runtimes where the agent
+    process sees a different filesystem than the operator (cli-docker,
+    sdk-in-container) — host paths like ``/Users/alice/bin/mcp`` or
+    ``/home/operator/...`` won't resolve and we reject them at
+    install time. ``False`` for cli-local where the agent runs on
+    the host, so host paths DO resolve and the check would produce
+    false positives.
+    """
+    if not name or not isinstance(name, str) or len(name) > 64:
+        raise RuntimeError(
+            f"invalid MCP server name {name!r}: required, string, max 64 chars"
+        )
+    if not command or not isinstance(command, str):
+        raise RuntimeError("command is required")
+    if check_host_local and _looks_host_local_command(command):
+        raise RuntimeError(
+            f"refusing to register command {command!r}: looks host-local "
+            "(absolute path that won't resolve inside the runtime). Use "
+            "a bare program name (npx, uvx, python3) or an absolute "
+            "path that exists in the container."
+        )
+    path = _workspace_mcp_path(workspace)
+    data = _read_json_or_empty(path)
+    servers = dict(data.get("mcpServers") or {})
+    servers[name] = {
+        "command": command,
+        "args": list(args or []),
+        "env": dict(env or {}),
+    }
+    data["mcpServers"] = servers
+    _atomic_write_json(path, data)
+    return path
+
+
+def _uninstall_mcp_server(workspace: Path, name: str) -> Path:
+    if not name or not isinstance(name, str):
+        raise RuntimeError("name is required")
+    path = _workspace_mcp_path(workspace)
+    if not path.exists():
+        raise RuntimeError(
+            f"no project-scope MCP config at {path}. nothing to remove."
+        )
+    data = _read_json_or_empty(path)
+    servers = dict(data.get("mcpServers") or {})
+    if name not in servers:
+        raise RuntimeError(
+            f"no agent-installed MCP server {name!r} at project scope. "
+            "use list_mcp_servers() to see what's available. system MCPs "
+            "can't be removed from here."
+        )
+    servers.pop(name)
+    data["mcpServers"] = servers
+    _atomic_write_json(path, data)
+    return path
+
+
+def _list_mcp_servers(workspace: Path, home: Path) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    try:
+        sys_data = _read_json_or_empty(_system_claude_json_path(home))
+    except RuntimeError:
+        sys_data = {}
+    for n in sorted((sys_data.get("mcpServers") or {}).keys()):
+        out.append(("system", n))
+    try:
+        agent_data = _read_json_or_empty(_workspace_mcp_path(workspace))
+    except RuntimeError:
+        agent_data = {}
+    for n in sorted((agent_data.get("mcpServers") or {}).keys()):
+        out.append(("agent", n))
+    return out
+
+
+def _write_refresh_flag(workspace: Path, model: Optional[str]) -> Path:
+    """Drop the refresh-flag file the worker watches on next turn.
+    Returns the flag path. ``model`` is either None (no override),
+    a non-empty string (switch to this model), or ``""`` (clear back
+    to the daemon default)."""
+    payload: dict[str, Any] = {"requested_at": int(time.time())}
+    if model is not None:
+        if not isinstance(model, str):
+            raise RuntimeError("model must be a string (or omitted)")
+        payload["model"] = model.strip()
+    flag_path = workspace / ".puffoagent" / "refresh.flag"
+    try:
+        flag_path.parent.mkdir(parents=True, exist_ok=True)
+        flag_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"could not write refresh flag: {exc}") from exc
+    return flag_path
 
 
 def _parse_post_ref(ref: str) -> str:
@@ -131,6 +406,13 @@ class ToolsConfig:
     team: str = ""
     owner_username: str = ""
     permission_timeout_seconds: float = 300.0
+    # Which adapter spawned this MCP server. Lets tools make
+    # runtime-aware decisions — e.g., install_mcp_server accepts
+    # host-local command paths on cli-local (agent runs on host)
+    # but rejects them on cli-docker (container can't see them).
+    # Set via ``PUFFO_RUNTIME_KIND`` env var. Values:
+    # ``cli-local``, ``cli-docker``, ``sdk``, or empty (unknown).
+    runtime_kind: str = ""
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -747,6 +1029,211 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             "(conversation history preserved via --resume)."
         )
 
+    # ── Skill + MCP install / refresh tools ──────────────────────────────────
+
+    @mcp.tool()
+    async def install_skill(name: str, content: str) -> str:
+        """Install a new skill into your project-scope skills dir so
+        you can invoke it with ``/<name>`` (or let Claude Code
+        auto-load it when the description matches).
+
+        **When to use:** You want to reuse a prompt playbook, checklist,
+        or procedure across many turns. Unlike CLAUDE.md content, a
+        skill only loads into context when invoked, so it costs almost
+        nothing until needed.
+
+        **Effect:** Writes ``<workspace>/.claude/skills/<name>/SKILL.md``
+        with the provided ``content`` and drops an
+        ``agent-installed.md`` marker alongside. Project-scope is
+        owned by you; host syncs never touch it. Call ``refresh()``
+        afterwards so your next turn's claude subprocess picks it up.
+
+        Args:
+          name: slug (lowercase letters/digits/hyphens, max 64, can't
+            start with a hyphen).
+          content: the full SKILL.md body, typically starting with
+            ``---``-delimited YAML frontmatter (``name:``,
+            ``description:``) followed by markdown instructions.
+            See https://code.claude.com/docs/en/skills for the format.
+        """
+        dst = _install_skill(Path(cfg.workspace), name, content)
+        return (
+            f"installed skill {name!r} at project scope ({dst}). "
+            "Call refresh() so your next turn picks it up."
+        )
+
+    @mcp.tool()
+    async def uninstall_skill(name: str) -> str:
+        """Remove a skill you previously installed.
+
+        Only agent-installed skills at project scope can be removed.
+        System skills (synced from the operator's host) are managed
+        off-agent and uninstalling them here would just get overridden
+        on the next worker start anyway — this tool refuses to touch
+        them so you don't accidentally chase your tail.
+
+        Args:
+          name: the skill slug to remove.
+        """
+        _uninstall_skill(Path(cfg.workspace), name)
+        return (
+            f"uninstalled skill {name!r}. Call refresh() so your next "
+            "turn stops seeing it."
+        )
+
+    @mcp.tool()
+    async def list_skills() -> str:
+        """List every skill available to you, tagged by scope.
+
+        ``[system]`` entries live at user scope and are managed by the
+        operator. ``[agent]`` entries live at project scope and were
+        installed by you (or a previous session of you) via
+        ``install_skill``.
+
+        When the same name appears at both scopes, Claude Code applies
+        its own precedence: personal > project. list_skills shows both
+        so you can see what might shadow what.
+        """
+        entries = _list_skills(Path(cfg.workspace), Path.home())
+        if not entries:
+            return "(no skills installed)"
+        return "\n".join(
+            f"[{scope}]{' ' if scope == 'agent' else ''} {name}"
+            for scope, name in entries
+        )
+
+    @mcp.tool()
+    async def install_mcp_server(
+        name: str,
+        command: str,
+        args: Optional[list[str]] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> str:
+        """Register a new stdio MCP server at your project scope so
+        you gain its tools on your next turn.
+
+        **Distribution model:** MCP servers typically ship as npm or
+        Python packages invoked via ``npx`` / ``uvx``. You don't
+        install the package — the command fetches + caches it at
+        spawn time. Both ``npx`` and ``uvx`` are available inside the
+        runtime.
+
+        **Effect:** Writes ``<workspace>/.mcp.json`` with your entry
+        merged into ``mcpServers.<name>``. The file is project-scope
+        per Claude Code's documented layout
+        (https://code.claude.com/docs/en/mcp), separate from the
+        user-scope ``.claude.json`` host syncs manage.
+
+        **Restrictions:** the command must resolve inside the runtime.
+        On ``cli-docker`` host paths (``/Users/...``,
+        ``/home/<someone>/...``, Windows drive letters) are rejected
+        because they won't exist inside the container. On
+        ``cli-local`` the agent runs on the host so the check is
+        skipped — any path the host user can execute is fair game.
+
+        After install, call ``refresh()`` so the claude subprocess
+        respawns and connects to the new server.
+
+        Args:
+          name: short slug for the server (shown in ``/mcp``).
+          command: executable — ``npx``, ``uvx``, ``python3``, or an
+            absolute path inside the runtime.
+          args: argument list (default: []). Example for an npm MCP:
+            ``["-y", "@scope/mcp-package"]``.
+          env: environment variables to pass the server (default: {}).
+            Use this for per-server API keys.
+        """
+        # cli-local: agent runs on the host, so host paths resolve —
+        # skip the host-local rejection (it would fire false-positive
+        # on workspace-script MCPs under /home/<operator>/...).
+        check_host_local = cfg.runtime_kind != "cli-local"
+        path = _install_mcp_server(
+            Path(cfg.workspace), name, command, args, env,
+            check_host_local=check_host_local,
+        )
+        return (
+            f"registered MCP server {name!r} at project scope ({path}). "
+            "Call refresh() so the claude subprocess respawns and "
+            "connects to it."
+        )
+
+    @mcp.tool()
+    async def uninstall_mcp_server(name: str) -> str:
+        """Remove an MCP server you previously registered.
+
+        Only project-scope entries (the ones in ``<workspace>/.mcp.json``)
+        can be removed. System MCPs live in the user-scope
+        ``.claude.json`` and are managed by the operator.
+
+        Args:
+          name: the server name to remove.
+        """
+        _uninstall_mcp_server(Path(cfg.workspace), name)
+        return (
+            f"removed MCP server {name!r}. Call refresh() so the claude "
+            "subprocess respawns without it."
+        )
+
+    @mcp.tool()
+    async def list_mcp_servers() -> str:
+        """List every MCP server available to you, tagged by scope.
+
+        ``[system]`` entries come from the operator's user-scope
+        ``~/.claude.json`` (synced in at worker start). ``[agent]``
+        entries come from your own ``<workspace>/.mcp.json`` and
+        were registered via ``install_mcp_server``.
+
+        When the same name exists at both scopes, Claude Code applies
+        its precedence: local > project > user. list_mcp_servers shows
+        both so you can see what might shadow what.
+        """
+        entries = _list_mcp_servers(Path(cfg.workspace), Path.home())
+        if not entries:
+            return "(no MCP servers registered)"
+        return "\n".join(
+            f"[{scope}]{' ' if scope == 'agent' else ''} {n}"
+            for scope, n in entries
+        )
+
+    @mcp.tool()
+    async def refresh(model: Optional[str] = None) -> str:
+        """Respawn your claude subprocess so it re-discovers skills,
+        MCP servers, and optionally switches to a new model — without
+        regenerating CLAUDE.md.
+
+        **When to use:**
+        - You just called ``install_skill`` / ``install_mcp_server``
+          (or their uninstall siblings) and want the change live.
+        - You want to switch the runtime model mid-conversation.
+
+        **Difference from ``reload_system_prompt``:** reload rebuilds
+        your managed ``~/.claude/CLAUDE.md`` from primer + profile +
+        memory before restart. refresh only restarts — lighter, and
+        appropriate when you haven't edited profile/memory.
+
+        **What happens:**
+        1. Your current reply finishes normally.
+        2. On your NEXT incoming message, the daemon kills your claude
+           subprocess (optionally after mutating the model flag) and
+           respawns it with ``--resume`` pointing at the existing
+           session — so conversation history is preserved while config
+           is re-read fresh.
+
+        Args:
+          model: optional model override. Pass a model id like
+            ``claude-opus-4-6`` / ``claude-sonnet-4-6``, or empty
+            string to clear back to the daemon default. Omit to keep
+            the current model.
+        """
+        _write_refresh_flag(Path(cfg.workspace), model)
+        tail = f" (model override: {model!r})" if model is not None else ""
+        return (
+            "refresh requested — your claude subprocess will respawn "
+            "before your next message" + tail + ". Conversation history "
+            "is preserved via --resume; CLAUDE.md is not regenerated "
+            "(use reload_system_prompt for that)."
+        )
+
     @mcp.tool()
     async def approve_permission(
         tool_name: str, input: dict[str, Any],
@@ -854,6 +1341,14 @@ def _cfg_from_args() -> ToolsConfig:
         type=float,
         default=float(os.environ.get("PUFFO_PERMISSION_TIMEOUT", "300")),
     )
+    parser.add_argument(
+        "--runtime-kind",
+        default=os.environ.get("PUFFO_RUNTIME_KIND", ""),
+        choices=("", "cli-local", "cli-docker", "sdk"),
+        help="Which adapter spawned this server. Gates runtime-aware "
+             "checks like the host-local-command rejection in "
+             "install_mcp_server.",
+    )
     args = parser.parse_args()
 
     missing = [
@@ -874,6 +1369,7 @@ def _cfg_from_args() -> ToolsConfig:
         team=args.team,
         owner_username=args.owner_username,
         permission_timeout_seconds=args.permission_timeout,
+        runtime_kind=args.runtime_kind,
     )
 
 

@@ -4,12 +4,16 @@ name in agent.yml should fall back to 'default' with a WARNING,
 never silently run with some other mode.
 """
 
+import json
 import logging
 
 import pytest
 
 from puffoagent.agent.adapters.local_cli import (
+    PERMISSION_HOOK_FULL_MATCHER,
+    PERMISSION_HOOK_NON_EDIT_MATCHER,
     VALID_PERMISSION_MODES,
+    _is_puffoagent_hook_entry,
     _sanitise_permission_mode,
     LocalCLIAdapter,
 )
@@ -61,13 +65,19 @@ class TestSanitisePermissionMode:
 # ── _build_command ──────────────────────────────────────────────────────────
 
 
-def _make_adapter(permission_mode: str = "default", model: str = "") -> LocalCLIAdapter:
-    # tmp paths — we never spawn, so they don't need to exist.
+def _make_adapter(
+    permission_mode: str = "default",
+    model: str = "",
+    claude_dir: str = "/tmp/ws/.claude",
+) -> LocalCLIAdapter:
+    # tmp paths — we never spawn, so they don't need to exist (except
+    # when the test targets settings-file reconciliation, in which
+    # case the caller passes a real tmp_path).
     return LocalCLIAdapter(
         agent_id="a",
         model=model,
         workspace_dir="/tmp/ws",
-        claude_dir="/tmp/ws/.claude",
+        claude_dir=claude_dir,
         session_file="/tmp/a/cli_session.json",
         mcp_config_file="/tmp/a/mcp-config.json",
         agent_home_dir="/tmp/a",
@@ -126,3 +136,192 @@ class TestBuildCommand:
         cmd = adapter._build_command(extra_args=["--mcp-config", "/x.json"])
         assert cmd[-2] == "--mcp-config"
         assert cmd[-1] == "/x.json"
+
+
+# ── _hook_matcher_for_mode + _write_permission_hook_settings ─────────────────
+#
+# These together cover the fix for the "permission_mode is a no-op"
+# bug: claude runs PreToolUse hooks regardless of --permission-mode,
+# so the hook registration must itself be gated on the mode or else
+# ``bypassPermissions`` still DMs the owner on every Bash call.
+
+
+class TestHookMatcherForMode:
+    def test_default_returns_full_matcher(self):
+        adapter = _make_adapter(permission_mode="default")
+        assert adapter._hook_matcher_for_mode() == PERMISSION_HOOK_FULL_MATCHER
+
+    def test_accept_edits_returns_narrow_matcher(self):
+        # The narrow matcher deliberately EXCLUDES edit tools — the
+        # whole point of acceptEdits is that the user told claude to
+        # auto-accept edits without being asked.
+        adapter = _make_adapter(permission_mode="acceptEdits")
+        matcher = adapter._hook_matcher_for_mode()
+        assert matcher == PERMISSION_HOOK_NON_EDIT_MATCHER
+        assert "Edit" not in matcher
+        assert "Write" not in matcher
+        assert "Bash" in matcher
+
+    @pytest.mark.parametrize("mode", ["auto", "dontAsk", "bypassPermissions"])
+    def test_auto_off_modes_return_none(self, mode):
+        adapter = _make_adapter(permission_mode=mode)
+        assert adapter._hook_matcher_for_mode() is None
+
+
+def _read_settings(path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _puffoagent_pretools(settings: dict) -> list[dict]:
+    hooks_cfg = settings.get("hooks") or {}
+    pretool = hooks_cfg.get("PreToolUse") or []
+    return [e for e in pretool if _is_puffoagent_hook_entry(e)]
+
+
+class TestWritePermissionHookSettings:
+    """Reconciliation: settings.json must reflect the current
+    permission_mode, not whatever was written on a previous run.
+    """
+
+    def test_default_mode_registers_full_matcher(self, tmp_path):
+        adapter = _make_adapter(
+            permission_mode="default", claude_dir=str(tmp_path),
+        )
+        adapter._write_permission_hook_settings()
+
+        settings = _read_settings(tmp_path / "settings.json")
+        ours = _puffoagent_pretools(settings)
+        assert len(ours) == 1
+        assert ours[0]["matcher"] == PERMISSION_HOOK_FULL_MATCHER
+
+    def test_accept_edits_registers_narrow_matcher(self, tmp_path):
+        adapter = _make_adapter(
+            permission_mode="acceptEdits", claude_dir=str(tmp_path),
+        )
+        adapter._write_permission_hook_settings()
+
+        settings = _read_settings(tmp_path / "settings.json")
+        ours = _puffoagent_pretools(settings)
+        assert len(ours) == 1
+        assert ours[0]["matcher"] == PERMISSION_HOOK_NON_EDIT_MATCHER
+
+    @pytest.mark.parametrize("mode", ["auto", "dontAsk", "bypassPermissions"])
+    def test_auto_off_modes_do_not_register_hook(self, mode, tmp_path):
+        # Core bug-fix assertion: setting bypassPermissions must NOT
+        # leave a puffoagent hook in settings.json, because the hook
+        # would override the mode and DM the owner anyway.
+        adapter = _make_adapter(
+            permission_mode=mode, claude_dir=str(tmp_path),
+        )
+        adapter._write_permission_hook_settings()
+
+        settings = _read_settings(tmp_path / "settings.json")
+        assert _puffoagent_pretools(settings) == []
+
+    def test_mode_switch_removes_stale_entry(self, tmp_path):
+        # Start on default (registers full matcher), then switch the
+        # adapter to bypassPermissions and reconcile again. The old
+        # entry must be gone — otherwise changing permission_mode
+        # wouldn't take effect until the settings.json was hand-edited.
+        first = _make_adapter(
+            permission_mode="default", claude_dir=str(tmp_path),
+        )
+        first._write_permission_hook_settings()
+        assert len(_puffoagent_pretools(_read_settings(tmp_path / "settings.json"))) == 1
+
+        second = _make_adapter(
+            permission_mode="bypassPermissions", claude_dir=str(tmp_path),
+        )
+        second._write_permission_hook_settings()
+        settings = _read_settings(tmp_path / "settings.json")
+        assert _puffoagent_pretools(settings) == []
+
+    def test_mode_switch_updates_matcher(self, tmp_path):
+        # default → acceptEdits must swap full matcher for narrow,
+        # not stack a second entry.
+        first = _make_adapter(
+            permission_mode="default", claude_dir=str(tmp_path),
+        )
+        first._write_permission_hook_settings()
+        second = _make_adapter(
+            permission_mode="acceptEdits", claude_dir=str(tmp_path),
+        )
+        second._write_permission_hook_settings()
+
+        settings = _read_settings(tmp_path / "settings.json")
+        ours = _puffoagent_pretools(settings)
+        assert len(ours) == 1
+        assert ours[0]["matcher"] == PERMISSION_HOOK_NON_EDIT_MATCHER
+
+    def test_preserves_non_puffoagent_hooks(self, tmp_path):
+        # Settings written by the operator (e.g. a custom lint hook)
+        # must survive reconciliation — only the puffoagent entry is
+        # ours to rewrite.
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{
+                        "type": "command",
+                        "command": "/usr/local/bin/my-custom-hook.sh",
+                    }]},
+                ],
+                "PostToolUse": [
+                    {"matcher": "Edit", "hooks": [{
+                        "type": "command", "command": "echo post",
+                    }]},
+                ],
+            },
+            "env": {"MY_VAR": "keepme"},
+        }))
+
+        adapter = _make_adapter(
+            permission_mode="default", claude_dir=str(tmp_path),
+        )
+        adapter._write_permission_hook_settings()
+
+        settings = _read_settings(settings_path)
+        assert settings["env"]["MY_VAR"] == "keepme"
+        assert "PostToolUse" in settings["hooks"]
+        pretool = settings["hooks"]["PreToolUse"]
+        # Custom hook preserved, plus ours appended.
+        assert any(
+            h.get("command", "").endswith("my-custom-hook.sh")
+            for e in pretool for h in (e.get("hooks") or [])
+        )
+        assert len(_puffoagent_pretools(settings)) == 1
+
+    def test_repeat_writes_do_not_stack(self, tmp_path):
+        # Each worker start calls _write_permission_hook_settings. It
+        # must be idempotent — replacing our entry, never appending.
+        adapter = _make_adapter(
+            permission_mode="default", claude_dir=str(tmp_path),
+        )
+        for _ in range(5):
+            adapter._write_permission_hook_settings()
+        settings = _read_settings(tmp_path / "settings.json")
+        assert len(_puffoagent_pretools(settings)) == 1
+
+
+class TestIsPuffoagentHookEntry:
+    def test_detects_by_command_marker(self):
+        entry = {
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": '"/usr/bin/python" -m puffoagent.hooks.permission',
+            }],
+        }
+        assert _is_puffoagent_hook_entry(entry) is True
+
+    def test_ignores_user_hooks(self):
+        entry = {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo hi"}],
+        }
+        assert _is_puffoagent_hook_entry(entry) is False
+
+    def test_handles_malformed_entries(self):
+        assert _is_puffoagent_hook_entry("not a dict") is False
+        assert _is_puffoagent_hook_entry({}) is False
+        assert _is_puffoagent_hook_entry({"hooks": "not a list"}) is False

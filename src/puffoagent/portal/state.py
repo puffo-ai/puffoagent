@@ -24,6 +24,7 @@ the contract.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -101,8 +102,12 @@ def shared_fs_dir() -> Path:
 # Note: ``.claude.json`` is a SIBLING of the ``.claude/`` dir, not
 # inside it. Claude CLI reads it from ``$HOME/.claude.json`` so we
 # mirror the same layout in the per-agent home.
+# Files the per-agent virtual ``$HOME`` gets on first use.
+# ``.credentials.json`` is deliberately NOT in this list — it's
+# set up separately via ``link_host_credentials`` below so every
+# agent tracks the operator's live OAuth state (matches cli-docker's
+# single-file bind-mount model).
 _CLAUDE_HOME_SEED_PATHS = (
-    ".claude/.credentials.json",
     ".claude/settings.json",
     ".claude.json",
 )
@@ -111,9 +116,15 @@ _CLAUDE_HOME_SEED_PATHS = (
 def seed_claude_home(host_home: Path, agent_home: Path) -> bool:
     """Seed a per-agent virtual ``$HOME`` from the operator's real
     ``$HOME`` so each agent has its own isolated claude identity.
-    Copies ``.claude/.credentials.json`` + ``.claude/settings.json``
-    + sibling ``.claude.json``. Idempotent — never overwrites an
-    existing file so refreshed tokens from prior bot runs survive.
+    Copies ``.claude/settings.json`` + sibling ``.claude.json``.
+    Idempotent — never overwrites an existing file so agent-side
+    customisation survives across restarts.
+
+    ``.credentials.json`` is NOT seeded here — see
+    ``link_host_credentials``. It's symlinked (or copied) from the
+    host's live file so every agent tracks operator re-logins
+    automatically, the way cli-docker's bind-mount already does.
+
     Returns True if any file was copied (diagnostic only).
     """
     import shutil
@@ -131,6 +142,270 @@ def seed_claude_home(host_home: Path, agent_home: Path) -> bool:
         except OSError:
             continue
     return copied
+
+
+def link_host_credentials(host_home: Path, agent_home: Path) -> str:
+    """Point the agent's ``.credentials.json`` at the operator's
+    live host file so OAuth state is SHARED across cli-local agents
+    (and the operator's own ``claude`` usage), matching cli-docker's
+    single-file bind-mount semantics.
+
+    Why share: Anthropic OAuth uses rotating refresh tokens. The
+    original per-agent-copy design caused agents' copies to go stale
+    whenever the operator re-ran ``claude login`` — the host's copy
+    refreshed, but the agent's stayed frozen until the next worker
+    restart, and eventually its refresh token itself expired with no
+    recovery path. Sharing one file flips the model: any refresh
+    (host, any agent) updates the single file; every other consumer
+    sees it on the next read.
+
+    Preference order:
+
+    1. **Symlink** — best: read-through is free, atomic-rename writes
+       on the host side automatically re-resolve through the symlink,
+       no periodic sync needed.
+    2. **Copy** — fallback for Windows-without-Developer-Mode or other
+       locked-down systems where ``os.symlink`` fails. Re-copies if
+       host mtime > agent mtime; callers should invoke this helper
+       periodically (on worker start AND on every refresh_ping tick)
+       so copy-mode agents stay close to live.
+
+    Hardlinks are deliberately skipped — claude rewrites the
+    credentials file with an atomic tmp+rename, which breaks the
+    shared inode. Symlinks survive that pattern; copies just get
+    re-copied on the next tick.
+
+    Idempotent. Returns ``"symlink"``, ``"symlink (already)"``,
+    ``"copy"``, ``"copy (fresh)"``, or ``"no-host-file"`` as a
+    diagnostic.
+    """
+    import shutil
+    host_creds = host_home / ".claude" / ".credentials.json"
+    agent_creds = agent_home / ".claude" / ".credentials.json"
+    if not host_creds.exists():
+        return "no-host-file"
+    agent_creds.parent.mkdir(parents=True, exist_ok=True)
+
+    # Fast path: agent already has a symlink pointing at host_creds.
+    # Nothing to do — readers see live host state through it.
+    if agent_creds.is_symlink():
+        try:
+            current = os.readlink(agent_creds)
+            if Path(current) == host_creds or current == str(host_creds):
+                return "symlink (already)"
+        except OSError:
+            pass
+
+    # Fast path: agent has a regular copy that's already up-to-date.
+    # Checked before we tear down the file — no pointless rewrites.
+    if (
+        agent_creds.exists()
+        and not agent_creds.is_symlink()
+        and _file_is_up_to_date(agent_creds, host_creds)
+    ):
+        return "copy (fresh)"
+
+    # Tear down whatever's there so we can create a fresh symlink /
+    # copy. Swallow unlink errors — on Windows a race against another
+    # process holding the file open can fail; the subsequent create
+    # path will retry naturally on the next call.
+    try:
+        if agent_creds.is_symlink() or agent_creds.exists():
+            agent_creds.unlink()
+    except OSError:
+        pass
+
+    try:
+        os.symlink(host_creds, agent_creds)
+        return "symlink"
+    except (OSError, NotImplementedError):
+        pass
+
+    try:
+        shutil.copy2(host_creds, agent_creds)
+        return "copy"
+    except OSError:
+        return "no-host-file"
+
+
+def _file_is_up_to_date(dst: Path, src: Path) -> bool:
+    """True when ``dst`` and ``src`` have the same mtime + size.
+    Used by ``link_host_credentials`` to skip unnecessary re-copies
+    in the Windows-without-Developer-Mode fallback path."""
+    try:
+        ds, ss = dst.stat(), src.stat()
+    except OSError:
+        return False
+    return ds.st_mtime == ss.st_mtime and ds.st_size == ss.st_size
+
+
+# Marker files dropped inside every skill directory to tag who
+# owns it. Claude Code only loads SKILL.md as a skill's entrypoint;
+# these siblings are inert unless referenced from SKILL.md, so
+# they're safe to drop for provenance tracking.
+HOST_SYNCED_MARKER = "host-synced.md"
+AGENT_INSTALLED_MARKER = "agent-installed.md"
+
+_HOST_SYNCED_MARKER_BODY = (
+    "This skill is synced from the operator's ~/.claude/skills/ on "
+    "every worker start. Do not edit; changes will be overwritten.\n"
+)
+_AGENT_INSTALLED_MARKER_BODY = (
+    "This skill was installed by the agent via the install_skill "
+    "MCP tool. It lives at project scope and survives host syncs.\n"
+)
+
+
+def sync_host_skills(host_home: Path, agent_home: Path) -> int:
+    """Copy every skill *directory* from the operator's real
+    ``~/.claude/skills/`` into the per-agent virtual ``$HOME``'s
+    user-level skills dir. Each skill is a subdirectory containing
+    at least ``SKILL.md`` (the Claude Code skill format), so we copy
+    whole trees rather than flat ``*.md`` files.
+
+    Semantics:
+      * Every synced dir gets a ``host-synced.md`` marker so provenance
+        is discoverable at list time and the pruner below knows what
+        it owns.
+      * On name collision with an agent-installed skill (marker present),
+        the agent's copy is preserved — host never clobbers agent work,
+        even if the same name lands in user scope by mistake.
+      * Stale host-synced skills (host removed the skill) are pruned
+        from the agent dir so old copies don't shadow current ones.
+      * Flat ``.md`` files at the top level of ``~/.claude/skills/``
+        are ignored — they aren't valid Claude Code skills.
+
+    Returns the number of skill directories copied (diagnostic only).
+    """
+    import shutil
+    src = host_home / ".claude" / "skills"
+    dst_root = agent_home / ".claude" / "skills"
+
+    host_names: set[str] = set()
+    if src.is_dir():
+        host_names = {p.name for p in src.iterdir() if p.is_dir()}
+
+    copied = 0
+    if host_names:
+        dst_root.mkdir(parents=True, exist_ok=True)
+        for name in sorted(host_names):
+            src_dir = src / name
+            dst_dir = dst_root / name
+            if (dst_dir / AGENT_INSTALLED_MARKER).exists():
+                continue
+            try:
+                if dst_dir.exists():
+                    shutil.rmtree(dst_dir)
+                shutil.copytree(src_dir, dst_dir)
+                (dst_dir / HOST_SYNCED_MARKER).write_text(
+                    _HOST_SYNCED_MARKER_BODY, encoding="utf-8",
+                )
+                copied += 1
+            except OSError:
+                continue
+
+    if dst_root.is_dir():
+        for entry in dst_root.iterdir():
+            if not entry.is_dir() or entry.name in host_names:
+                continue
+            if (entry / HOST_SYNCED_MARKER).exists() and not (
+                entry / AGENT_INSTALLED_MARKER
+            ).exists():
+                try:
+                    shutil.rmtree(entry)
+                except OSError:
+                    pass
+
+    return copied
+
+
+# Commands that reference these prefixes on the host won't resolve
+# inside the container's Linux filesystem. ``/home/agent/`` IS valid
+# inside the container and is handled separately below.
+_HOST_LOCAL_COMMAND_PREFIXES = ("/Users/", "/tmp/", "/var/folders/")
+
+
+def _looks_host_local_command(command: str) -> bool:
+    """Return True when ``command`` points at a host-specific path
+    that won't exist inside a puffoagent-runtime container. Used to
+    surface a warning when merging host MCP registrations into a
+    per-agent ``.claude.json``. Conservative by design — only flags
+    paths we're confident don't resolve. Bare program names
+    (``npx``, ``python3``) pass through without a warning because
+    they're expected on PATH in the image.
+    """
+    if not command:
+        return False
+    # Windows drive-letter paths or backslash separators can't
+    # possibly resolve inside a Linux container.
+    if re.match(r"^[A-Za-z]:[\\/]", command) or "\\" in command:
+        return True
+    # Any /home/ path other than the container's own /home/agent/ is
+    # an operator's home dir on the host and won't exist inside.
+    if command.startswith("/home/") and not command.startswith("/home/agent/"):
+        return True
+    return any(command.startswith(p) for p in _HOST_LOCAL_COMMAND_PREFIXES)
+
+
+def sync_host_mcp_servers(
+    host_home: Path, agent_home: Path,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Merge the operator's user-level MCP registrations (``~/.claude.
+    json``'s ``mcpServers`` key) into the per-agent ``.claude.json``.
+
+    Semantics:
+      * host-registered names overwrite the per-agent entry on name
+        collision (host is source of truth for host-installed MCPs);
+      * names that only exist in the per-agent file are preserved
+        (those were registered by the agent itself and must survive);
+      * every other key on ``.claude.json`` is left untouched so the
+        claude CLI can keep managing its own metadata there.
+
+    Returns ``(merged_count, unreachable)`` — ``merged_count`` is the
+    number of host entries written into the per-agent file;
+    ``unreachable`` lists ``(name, command)`` pairs whose ``command``
+    looks host-local (absolute path that won't resolve inside the
+    container). The caller is expected to log a warning for each.
+    """
+    host_path = host_home / ".claude.json"
+    if not host_path.exists():
+        return 0, []
+    try:
+        host_data = json.loads(host_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return 0, []
+    host_servers = host_data.get("mcpServers") or {}
+    if not host_servers:
+        return 0, []
+
+    agent_path = agent_home / ".claude.json"
+    agent_data: dict[str, Any] = {}
+    if agent_path.exists():
+        try:
+            raw = agent_path.read_text(encoding="utf-8")
+            if raw.strip():
+                agent_data = json.loads(raw)
+        except (OSError, ValueError):
+            agent_data = {}
+
+    agent_servers = dict(agent_data.get("mcpServers") or {})
+    unreachable: list[tuple[str, str]] = []
+    for name, cfg in host_servers.items():
+        agent_servers[name] = cfg
+        if isinstance(cfg, dict):
+            cmd = cfg.get("command") or ""
+            if isinstance(cmd, str) and _looks_host_local_command(cmd):
+                unreachable.append((name, cmd))
+    agent_data["mcpServers"] = agent_servers
+
+    try:
+        agent_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = agent_path.with_suffix(agent_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(agent_data, indent=2), encoding="utf-8")
+        os.replace(tmp, agent_path)
+    except OSError:
+        return 0, []
+    return len(host_servers), unreachable
 
 
 def daemon_yml_path() -> Path:
@@ -407,6 +682,13 @@ class RuntimeState:
     msg_count: int = 0
     last_event_at: int = 0
     error: str = ""
+    # Claude-side health, independent of the worker lifecycle
+    # ``status``. "ok" = last smoke test passed; "auth_failed" =
+    # refresh-ping detected a 401 / authentication_error; "unknown"
+    # = no probe has run yet (worker just started). Written by the
+    # credential_refresh task after each tick based on the adapter's
+    # auth_healthy flag. See 2026-04-21 Core 3 freeze incident.
+    health: str = "unknown"  # ok | auth_failed | unknown
 
     @classmethod
     def load(cls, agent_id: str) -> "RuntimeState | None":
@@ -426,6 +708,7 @@ class RuntimeState:
             msg_count=int(raw.get("msg_count", 0)),
             last_event_at=int(raw.get("last_event_at", 0)),
             error=raw.get("error", ""),
+            health=raw.get("health", "unknown"),
         )
 
     def save(self, agent_id: str) -> None:

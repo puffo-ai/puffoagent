@@ -311,6 +311,7 @@ class Worker:
             )
 
         reload_flag_path = Path(workspace_path) / ".puffoagent" / "reload.flag"
+        refresh_flag_path = Path(workspace_path) / ".puffoagent" / "refresh.flag"
         # Per-turn context file for the cli-local permission hook. The
         # hook is a separate subprocess claude spawns per tool call,
         # so it can't reach into the worker's memory — it reads this
@@ -340,6 +341,19 @@ class Worker:
                     puffo=puffo,
                     adapter=self._adapter,
                     flag_path=reload_flag_path,
+                )
+                # Reload already subsumes refresh (killed subprocess +
+                # reread config). Drop any sibling refresh flag so we
+                # don't double-restart.
+                try:
+                    refresh_flag_path.unlink()
+                except OSError:
+                    pass
+            elif refresh_flag_path.exists():
+                await _refresh_from_disk(
+                    agent_id=agent_id,
+                    adapter=self._adapter,
+                    flag_path=refresh_flag_path,
                 )
             try:
                 current_turn_path.parent.mkdir(parents=True, exist_ok=True)
@@ -420,6 +434,18 @@ class Worker:
                         "agent %s: credential refresh tick failed: %s",
                         agent_id, exc,
                     )
+                # Reflect the smoke-test outcome into runtime.health
+                # so operators can see auth_failed via ``puffoagent
+                # status`` without tailing logs. ``auth_healthy`` is
+                # None until the first probe runs — map that to
+                # "unknown" so we never overwrite a real result with
+                # a stale default.
+                probed = getattr(self._adapter, "auth_healthy", None)
+                if probed is True:
+                    self.runtime.health = "ok"
+                elif probed is False:
+                    self.runtime.health = "auth_failed"
+                self.runtime.save(agent_id)
                 try:
                     await asyncio.wait_for(
                         self._stop.wait(),
@@ -511,6 +537,54 @@ async def _reload_from_disk(
         logger.info("agent %s: reloaded system prompt from disk", agent_id)
     except Exception as exc:
         logger.warning("agent %s: reload failed: %s", agent_id, exc)
+    finally:
+        try:
+            flag_path.unlink()
+        except OSError:
+            pass
+
+
+async def _refresh_from_disk(
+    *,
+    agent_id: str,
+    adapter,
+    flag_path: Path,
+) -> None:
+    """Kill the claude subprocess so it respawns on the next turn and
+    re-reads skills, .mcp.json, .claude.json — without rebuilding
+    CLAUDE.md. Honour an optional ``model`` override in the flag
+    payload so the respawn picks up the new model flag.
+
+    Called by ``on_message`` when the agent has set the refresh flag
+    via the ``refresh`` MCP tool. Much cheaper than ``_reload_from_disk``
+    because it skips shared-primer / profile / memory assembly — use
+    this path for pure config churn (new skills, new MCPs, model
+    switch), use reload for CLAUDE.md edits.
+    """
+    try:
+        try:
+            raw = flag_path.read_text(encoding="utf-8")
+            payload = json.loads(raw) if raw.strip() else {}
+        except (OSError, ValueError):
+            payload = {}
+        new_model = payload.get("model") if isinstance(payload, dict) else None
+        if new_model is not None and hasattr(adapter, "model"):
+            old_model = getattr(adapter, "model", "")
+            adapter.model = str(new_model)
+            logger.info(
+                "agent %s: model override via refresh: %r -> %r",
+                agent_id, old_model, adapter.model,
+            )
+        # reload() ignores its argument — both adapter implementations
+        # just tear down the subprocess. The next turn spawns fresh
+        # and re-reads all on-disk config (skills, mcpServers, model).
+        await adapter.reload("")
+        logger.info(
+            "agent %s: refreshed (subprocess will respawn next turn)",
+            agent_id,
+        )
+    except Exception as exc:
+        logger.warning("agent %s: refresh failed: %s", agent_id, exc)
     finally:
         try:
             flag_path.unlink()

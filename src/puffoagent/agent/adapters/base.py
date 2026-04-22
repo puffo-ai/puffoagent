@@ -94,6 +94,16 @@ class TurnResult:
 class Adapter(ABC):
     """Base class for all runtime adapters."""
 
+    # Observed auth/inference health from the most recent probe
+    # (refresh ping or smoke test). ``None`` = never checked, ``True``
+    # = last probe succeeded, ``False`` = last probe found an auth
+    # failure (claude responded with a 401 / authentication_error).
+    # Set by the refresh_ping path; read by the worker to surface
+    # an ``auth_failed`` sub-status in ``puffoagent status``.
+    # Default attribute rather than __init__ field so every subclass
+    # inherits it without touching its constructor.
+    auth_healthy: bool | None = None
+
     @abstractmethod
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         """Execute one turn against the underlying runtime."""
@@ -236,6 +246,38 @@ class Adapter(ABC):
         servers). Default is a no-op for stateless adapters.
         """
         return None
+
+
+# Substrings (case-insensitive) that mark a claude CLI one-shot
+# output as an auth failure rather than a real reply. Called from
+# the refresh-ping / smoke-test path in every CLI adapter. The
+# patterns come from the 2026-04-21 Core 3 freeze incident (stale
+# OAuth, ``claude auth status`` still reported logged-in but the
+# API returned 401). Kept deliberately strong so a user happening
+# to ask about HTTP auth doesn't flip the health flag.
+_AUTH_FAILURE_SIGNATURES = (
+    "api error: 401",
+    "invalid authentication credentials",
+    '"type":"authentication_error"',
+    "authentication_error",
+    "invalid_grant",
+    "please run /login",
+    "please run `claude /login`",
+    "run `claude login`",
+)
+
+
+def looks_like_auth_failure(*parts: str) -> bool:
+    """True if any of the supplied strings (stdout, stderr, reply
+    text) contain a claude auth-failure signature. Case-insensitive.
+    """
+    for p in parts:
+        if not p:
+            continue
+        low = p.lower()
+        if any(sig in low for sig in _AUTH_FAILURE_SIGNATURES):
+            return True
+    return False
 
 
 def format_history_as_prompt(messages: list[dict]) -> str:
