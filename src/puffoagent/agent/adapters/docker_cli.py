@@ -562,10 +562,7 @@ class DockerCLIAdapter(Adapter):
             self._started = True
 
     async def _ensure_image(self) -> None:
-        rc, _, _ = await _run_cmd(
-            ["docker", "image", "inspect", self.image], check=False,
-        )
-        if rc == 0:
+        if await _image_exists_locally(self.image):
             return
         if self.image != DEFAULT_IMAGE:
             raise RuntimeError(
@@ -573,11 +570,27 @@ class DockerCLIAdapter(Adapter):
                 f"pull it (`docker pull {self.image}`) or clear "
                 "runtime.docker_image to use the bundled default."
             )
-        logger.info(
-            "agent %s: building docker image %s (first use — this may take a few minutes)",
-            self.agent_id, self.image,
-        )
-        await self._build_image()
+        # Daemon-wide lock so N agents that all tick past
+        # ``_ensure_started`` at the same time don't each kick off
+        # their own ``docker build -t <image>``. Concurrent builds
+        # against the same tag race in BuildKit's exporter — the
+        # loser gets "image already exists" and crashes its worker.
+        # Policy: the first agent to grab the lock runs the build;
+        # the others wait, then re-check (likely see the image now
+        # and skip).
+        async with _BUILD_LOCK:
+            if await _image_exists_locally(self.image):
+                logger.info(
+                    "agent %s: image %s was built by another worker "
+                    "during our wait — skipping rebuild",
+                    self.agent_id, self.image,
+                )
+                return
+            logger.info(
+                "agent %s: building docker image %s (first use — this may take a few minutes)",
+                self.agent_id, self.image,
+            )
+            await self._build_image()
 
     async def _build_image(self) -> None:
         proc = await asyncio.create_subprocess_exec(
@@ -731,6 +744,22 @@ def _seed_hermes_config(agent_home: Path, model: str) -> None:
         cfg.write_text("\n".join(body) + "\n", encoding="utf-8")
     except OSError as exc:
         logger.warning("couldn't seed hermes config.yaml at %s: %s", cfg, exc)
+
+
+# Daemon-wide lock around ``docker build -t <tag>``. Serialises
+# concurrent cli-docker workers that all hit ``_ensure_image`` at
+# the same time (e.g. right after an image-tag bump like v6 -> v7).
+# Without it BuildKit's exporter races when two builds produce the
+# same tag, and one worker bails out with
+# ``image "<repo>:<tag>": already exists``.
+_BUILD_LOCK = asyncio.Lock()
+
+
+async def _image_exists_locally(tag: str) -> bool:
+    rc, _, _ = await _run_cmd(
+        ["docker", "image", "inspect", tag], check=False,
+    )
+    return rc == 0
 
 
 async def _kill_hermes_proc(proc, agent_id: str) -> None:
