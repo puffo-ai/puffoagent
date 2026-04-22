@@ -100,7 +100,13 @@ class PuffoAgent:
         )
         result = await self.adapter.run_turn(ctx)
 
-        if not result.reply or result.reply.strip() == "[SILENT]":
+        # Substring match (not equality): agents sometimes hedge with
+        # prose around the marker, e.g. "[SILENT] I wasn't mentioned
+        # in this thread" — we treat any reply containing the
+        # ``[SILENT]`` token as silent. The primer still tells agents
+        # to emit EXACTLY ``[SILENT]``; this just stops punishing
+        # them for being verbose about the decision.
+        if not result.reply or "[SILENT]" in result.reply:
             self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
             return None
 
@@ -152,7 +158,11 @@ class PuffoAgent:
             lines.append("- mentions:")
             for m in mentions:
                 kind = "bot" if m.get("is_bot") else "human"
-                lines.append(f"  - {m['username']} ({kind})")
+                # The self marker pairs with the @you(name) rewrite
+                # in the message body — two independent signals so
+                # agents that only parse one layer still spot it.
+                marker = " — that's you" if m.get("is_self") else ""
+                lines.append(f"  - {m['username']} ({kind}){marker}")
         if attachments:
             lines.append("- attachments:")
             for path in attachments:
