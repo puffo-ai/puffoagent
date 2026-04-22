@@ -791,23 +791,33 @@ async def _hermes_turn(proc, user_message: str, agent_id: str):
     If this proves racy in practice we'll upgrade to a prompt-
     marker read (``> `` or similar) once we've seen the actual
     output shape.
+
+    We drain stderr concurrently so hermes' own diagnostics aren't
+    lost when the process exits early — without this, a config
+    error or missing-credentials banner just looked like a silent
+    same-size reply every turn.
     """
     started = time.time()
     if proc.stdin is None or proc.stdout is None:
         return TurnResult(reply="", metadata={
             "error": "hermes subprocess has no stdin/stdout",
         })
+    stderr_task = asyncio.ensure_future(_drain(proc.stderr)) if proc.stderr else None
     try:
         proc.stdin.write(user_message.encode("utf-8") + b"\n")
         await proc.stdin.drain()
     except (BrokenPipeError, ConnectionResetError) as exc:
         logger.error("agent %s: hermes stdin write failed: %s", agent_id, exc)
+        err_tail = await _cancel_and_collect(stderr_task)
+        if err_tail:
+            logger.error("agent %s: hermes stderr: %s", agent_id, err_tail[-600:])
         return TurnResult(reply="", metadata={
             "error": f"hermes stdin closed: {exc}",
         })
 
     deadline = started + _HERMES_TURN_TIMEOUT_SECONDS
     chunks: list[bytes] = []
+    exited_early = False
     while True:
         remaining = deadline - time.time()
         if remaining <= 0:
@@ -825,16 +835,64 @@ async def _hermes_turn(proc, user_message: str, agent_id: str):
             # Idle window reached — assume hermes is done.
             break
         if not chunk:
-            break  # EOF — process exited mid-turn
+            # EOF — process exited mid-turn. Capture returncode +
+            # stderr for the log so we can see WHY it died instead
+            # of just seeing "42 reply chars" every time.
+            exited_early = True
+            break
         chunks.append(chunk)
 
     elapsed = time.time() - started
     reply = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    err_tail = await _cancel_and_collect(stderr_task)
+    if exited_early:
+        rc = proc.returncode
+        logger.error(
+            "agent %s: hermes exited mid-turn in %.1fs (rc=%s). "
+            "stdout snippet: %r | stderr tail: %s",
+            agent_id, elapsed, rc, reply[:400], (err_tail or "(empty)")[-600:],
+        )
+        return TurnResult(reply="", metadata={
+            "error": f"hermes exited rc={rc}",
+            "stdout_snippet": reply[:400],
+            "stderr_tail": (err_tail or "")[-600:],
+        })
     logger.info(
-        "agent %s: hermes turn done in %.1fs, %d reply chars",
-        agent_id, elapsed, len(reply),
+        "agent %s: hermes turn done in %.1fs, %d reply chars | preview: %r",
+        agent_id, elapsed, len(reply), reply[:200],
     )
+    if err_tail:
+        logger.info("agent %s: hermes stderr: %s", agent_id, err_tail[-400:])
     return TurnResult(reply=reply, metadata={"harness": "hermes"})
+
+
+async def _drain(stream) -> bytes:
+    """Read a subprocess stream until EOF. Used for stderr so
+    hermes' diagnostics aren't lost when it exits — we cancel/
+    collect just before returning the turn."""
+    chunks: list[bytes] = []
+    try:
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except asyncio.CancelledError:
+        pass
+    return b"".join(chunks)
+
+
+async def _cancel_and_collect(task) -> str:
+    """Stop a background drain task and return whatever it had read
+    so far. Decodes as utf-8 for log-friendliness."""
+    if task is None:
+        return ""
+    task.cancel()
+    try:
+        data = await task
+    except (asyncio.CancelledError, Exception):
+        data = b""
+    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else ""
 
 
 async def _run_cmd(cmd: list[str], check: bool = True) -> tuple[int, bytes, bytes]:
