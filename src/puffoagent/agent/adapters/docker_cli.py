@@ -130,12 +130,21 @@ RUN npm install -g @anthropic-ai/claude-code
 #
 # ``hermes-agent`` is the second harness we ship (alongside claude-
 # code). When an agent sets ``runtime.harness=hermes`` puffoagent
-# spawns ``hermes chat -q`` inside this container; it auto-discovers
-# our linked ``~/.claude/.credentials.json`` and calls the Anthropic
-# API directly. Heads-up: billing routes to Anthropic's extra_usage
-# pool (NousResearch/hermes-agent#12905), NOT the Claude subscription.
+# spawns the interactive ``hermes`` inside this container; it
+# auto-discovers our linked ``~/.claude/.credentials.json`` and
+# calls the Anthropic API directly. Heads-up: billing routes to
+# Anthropic's extra_usage pool (NousResearch/hermes-agent#12905),
+# NOT the Claude subscription.
+#
+# hermes-agent is not published to PyPI — the official install
+# paths are a shell installer or a git checkout. We install
+# directly from the upstream git repo; ``git`` is already in the
+# base apt layer above. Pinned to the v0.10 series; revisit the
+# pin when hermes ships a new major.
 RUN pip3 install --break-system-packages --no-cache-dir \\
-        "mcp>=1.0" "aiohttp>=3.9" "uv>=0.5" "hermes-agent"
+        "mcp>=1.0" "aiohttp>=3.9" "uv>=0.5" \\
+     && pip3 install --break-system-packages --no-cache-dir \\
+        "git+https://github.com/NousResearch/hermes-agent.git@main"
 
 RUN useradd -m -u 2000 -s /bin/bash agent
 USER agent
