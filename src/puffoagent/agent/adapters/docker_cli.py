@@ -263,12 +263,52 @@ class DockerCLIAdapter(Adapter):
     async def _run_hermes_chat(
         self, user_message: str, system_prompt: str, *, _retried: bool = False,
     ) -> TurnResult:
+        # The upstream docs claim hermes auto-discovers Claude Code's
+        # credential file at ``~/.claude/.credentials.json``. In
+        # practice (verified on a fresh v7 container) it does NOT —
+        # ``hermes auth list`` comes up empty on first invocation and
+        # ``hermes chat`` errors with "It looks like Hermes isn't
+        # configured yet -- no API keys or providers found."
+        #
+        # Workaround: read the access token out of the credentials
+        # file on the host and pass it to hermes via
+        # ``ANTHROPIC_API_KEY`` on the ``docker exec`` command. The
+        # file is kept fresh by Claude Code's own OAuth refresh
+        # machinery (it's bind-mounted from the host's
+        # ``~/.claude/.credentials.json``), so every turn reads the
+        # current token — no per-agent hermes state to maintain.
+        #
+        # ``sk-ant-oat01-...`` tokens are API-compatible with
+        # Anthropic's regular ``sk-ant-api03-...`` keys; hermes
+        # happily sends them with Bearer auth. Billing routes to
+        # Anthropic's ``extra_usage`` pool per
+        # NousResearch/hermes-agent#12905 — not your Claude
+        # subscription.
+        token = _read_claude_access_token()
+        if not token:
+            logger.error(
+                "agent %s: cannot read Claude Code access token from "
+                "%s — hermes turn would fail with no credentials. "
+                "run `claude login` on the host to refresh.",
+                self.agent_id, _HOST_CLAUDE_CREDENTIALS_PATH,
+            )
+            return TurnResult(reply="", metadata={
+                "error": "no Claude Code access token available on host",
+            })
+
         has_prior_session = self.session_file.exists()
         prompt = user_message if has_prior_session else _stitch_hermes_prompt(
             system_prompt, user_message,
         )
         cmd = [
-            "docker", "exec", "-i", self.container_name,
+            "docker", "exec", "-i",
+            # Put the token in argv-space to docker. Host-local
+            # visibility is acceptable (the daemon user already has
+            # read access to the credentials file). If we ever run
+            # the daemon on a shared host we should switch to
+            # --env-file + a short-lived tmpfile instead.
+            "-e", f"ANTHROPIC_API_KEY={token}",
+            self.container_name,
             "hermes", "chat",
             "--provider", "anthropic",
             "--quiet",
@@ -790,6 +830,34 @@ _HERMES_NO_RESUME_SIGNATURE = "No previous CLI session found to continue"
 # (everything after is the reply) and as a value to persist
 # alongside our sentinel for post-hoc debugging.
 _HERMES_SESSION_ID_RE = re.compile(r"^session_id:\s*(\S+)\s*$")
+
+
+# Where Claude Code stores its OAuth credentials on the host. We
+# read the access token from here on every hermes turn because
+# hermes' own auto-discovery is unreliable on a fresh container
+# (see ``_run_hermes_chat``). The file is kept fresh by Claude
+# Code's OAuth refresh path, which puffoagent's
+# ``refresh_ping`` + ``link_host_credentials`` already coordinate.
+_HOST_CLAUDE_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+
+
+def _read_claude_access_token() -> str:
+    """Extract the current Claude Code OAuth access token from the
+    host's credentials file so we can hand it to hermes via
+    ``ANTHROPIC_API_KEY``.
+
+    Returns the empty string on any failure (missing file, malformed
+    JSON, missing key). Caller logs the condition and surfaces a
+    turn-level error rather than erroring the worker — the operator
+    can re-run ``claude login`` without a daemon restart.
+    """
+    try:
+        data = json.loads(
+            _HOST_CLAUDE_CREDENTIALS_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return ""
+    return ((data.get("claudeAiOauth") or {}).get("accessToken") or "").strip()
 
 
 def _hermes_model_id(model: str) -> str:
