@@ -242,11 +242,29 @@ class DockerCLIAdapter(Adapter):
 
         On first ever worker start we spawn bare ``hermes``; on
         daemon restart we spawn ``hermes -c`` to resume the most
-        recent session (which, thanks to per-agent HOME isolation,
-        is unambiguously this agent's own last session).
+        recent session. If hermes rejects ``-c`` (our session-exists
+        sentinel and hermes' own session store can disagree — e.g.
+        the prior hermes process crashed before committing a
+        session), we clear our sentinel + dead proc and retry with
+        a fresh spawn. Single-level retry; if that fails too, we
+        surface the error.
         """
         proc = await self._ensure_hermes_proc(system_prompt)
-        return await _hermes_turn(proc, user_message, self.agent_id)
+        result = await _hermes_turn(proc, user_message, self.agent_id)
+        if _looks_like_stale_resume(result):
+            logger.info(
+                "agent %s: hermes rejected --continue (no prior session "
+                "in its store); clearing sentinel and spawning fresh",
+                self.agent_id,
+            )
+            self._hermes_proc = None
+            try:
+                self.session_file.unlink()
+            except OSError:
+                pass
+            proc = await self._ensure_hermes_proc(system_prompt)
+            result = await _hermes_turn(proc, user_message, self.agent_id)
+        return result
 
     async def _ensure_hermes_proc(self, system_prompt: str):
         """Spawn (or reuse) the long-lived interactive ``hermes`` in
@@ -864,6 +882,25 @@ async def _hermes_turn(proc, user_message: str, agent_id: str):
     if err_tail:
         logger.info("agent %s: hermes stderr: %s", agent_id, err_tail[-400:])
     return TurnResult(reply=reply, metadata={"harness": "hermes"})
+
+
+# hermes prints this exact line to stdout and exits rc=1 when ``-c``
+# is passed but it has no resumable session in ``~/.hermes/sessions/``.
+# Our session-exists sentinel (``cli_session.json``) can get out of sync
+# — e.g. the prior hermes process crashed before committing a session —
+# so we detect the case and fall back to a fresh spawn.
+_HERMES_NO_RESUME_SIGNATURE = "No previous CLI session found to continue"
+
+
+def _looks_like_stale_resume(result: TurnResult) -> bool:
+    """True when hermes exited rc=1 solely because ``-c`` pointed at
+    nothing resumable. Caller clears its sentinel + respawns without
+    ``-c``. Deliberately narrow: we don't want to retry on unrelated
+    crashes (e.g. missing credentials) because that would just loop."""
+    if not result.metadata.get("error"):
+        return False
+    snippet = result.metadata.get("stdout_snippet") or ""
+    return _HERMES_NO_RESUME_SIGNATURE in snippet
 
 
 async def _drain(stream) -> bytes:

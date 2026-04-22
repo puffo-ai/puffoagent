@@ -199,9 +199,14 @@ class LocalCLIAdapter(Adapter):
         is we don't prefix ``docker exec`` because the agent runs on
         the host. $HOME points at the agent's virtual home so hermes
         auto-discovers our linked ``.claude/.credentials.json``.
+
+        Same retry-on-stale-resume dance as cli-docker: if hermes
+        rejects ``-c`` because its session store doesn't match our
+        sentinel, clear both and respawn fresh.
         """
         from .docker_cli import (
             _hermes_turn,
+            _looks_like_stale_resume,
             _seed_hermes_config,
             _seed_hermes_soul,
         )
@@ -210,7 +215,24 @@ class LocalCLIAdapter(Adapter):
         )
         if proc is None:
             return TurnResult(reply="", metadata={"error": "hermes binary missing"})
-        return await _hermes_turn(proc, user_message, self.agent_id)
+        result = await _hermes_turn(proc, user_message, self.agent_id)
+        if _looks_like_stale_resume(result):
+            logger.info(
+                "agent %s: hermes rejected --continue; clearing sentinel "
+                "and spawning fresh", self.agent_id,
+            )
+            self._hermes_proc = None
+            try:
+                self.session_file.unlink()
+            except OSError:
+                pass
+            proc = await self._ensure_hermes_proc(
+                system_prompt, _seed_hermes_config, _seed_hermes_soul,
+            )
+            if proc is None:
+                return TurnResult(reply="", metadata={"error": "hermes binary missing"})
+            result = await _hermes_turn(proc, user_message, self.agent_id)
+        return result
 
     async def _ensure_hermes_proc(
         self, system_prompt: str, seed_config, seed_soul,
