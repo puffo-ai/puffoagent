@@ -220,12 +220,12 @@ Same CLI as `cli-local`, but inside its own sandboxed container. The container i
 
 Runtime decides *where* the agent executes (host subprocess / docker container / in-process SDK). **Harness** decides *what* executes there. Two are shipped:
 
-| Harness | Binary | Session protocol | Tool surface |
-|---|---|---|---|
-| `claude-code` (default) | `claude` | stream-json + `--resume` | Full Claude Code skills/MCP/permission-mode suite; `install_skill`, `refresh`, etc. |
-| `hermes` | `hermes` | long-lived interactive subprocess (piped stdin/stdout); per-agent HOME ⇒ per-agent session | Hermes' own skills/memory/tools; Claude-Code-specific MCP tools short-circuit with a clear error |
+| Harness | Binary | Session model | Tool surface | Runtimes |
+|---|---|---|---|---|
+| `claude-code` (default) | `claude` | long-lived stream-json subprocess + `--resume` | Full Claude Code skills/MCP/permission-mode suite; `install_skill`, `refresh`, etc. | `cli-local`, `cli-docker` |
+| `hermes` | `hermes chat -q --continue` per turn | One-shot per turn; hermes stores session in `~/.hermes/state.db` on disk, `--continue` resumes it | Hermes' own skills/memory/tools; Claude-Code-specific MCP tools return a clear error | **`cli-docker` only for now** — cli-local support needs separate design work (operator's own `~/.hermes/` isn't puffo-owned) |
 
-Only `cli-local` and `cli-docker` look at the harness field; `sdk` / `chat-only` ignore it.
+`sdk` / `chat-only` ignore the harness field.
 
 **Switch a cli-docker agent to Hermes:**
 
@@ -233,7 +233,7 @@ Only `cli-local` and `cli-docker` look at the harness field; `sdk` / `chat-only`
 puffoagent agent runtime <agent-id> --harness hermes
 ```
 
-On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v7` with `hermes-agent` pre-installed), seeds a minimal `~/.hermes/config.yaml` selecting the Anthropic native provider, and spawns `hermes` inside the container. Hermes auto-discovers Claude Code's credential store from `~/.claude/.credentials.json` — already linked there by puffoagent.
+On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v7` with `hermes-agent` pre-installed) and invokes `hermes chat --provider anthropic --quiet -q <msg>` inside the container. Hermes auto-discovers Claude Code's credential store from `~/.claude/.credentials.json` (already bind-mounted) — zero config needed. Subsequent turns add `--continue` so hermes resumes its session from `~/.hermes/state.db`.
 
 **Caveat worth eyes:** Anthropic routes third-party OAuth clients (that's hermes) to its `extra_usage` billing pool, NOT your Claude subscription — same token, different ledger. See [NousResearch/hermes-agent#12905](https://github.com/NousResearch/hermes-agent/issues/12905).
 
@@ -260,7 +260,7 @@ $EDITOR ~/.puffoagent/agents/<agent-id>/agent.yml
 ```yaml
 runtime:
   kind: cli-docker             # chat-only | sdk | cli-local | cli-docker
-  harness: claude-code         # claude-code | hermes (cli-local / cli-docker only)
+  harness: claude-code         # claude-code (cli-local + cli-docker) | hermes (cli-docker only)
   model: claude-sonnet-4-6     # optional; defaults to daemon config
   api_key: ""                  # sdk / chat-only; CLI kinds ignore this
   allowed_tools: []            # sdk only; ignored by CLI kinds

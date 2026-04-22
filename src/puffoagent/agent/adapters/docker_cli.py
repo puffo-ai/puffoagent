@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -218,10 +219,6 @@ class DockerCLIAdapter(Adapter):
         self._started_lock = asyncio.Lock()
         self._started = False
         self._session: ClaudeSession | None = None
-        # Long-lived ``hermes`` subprocess when harness=hermes.
-        # One process per adapter instance; replies drift through
-        # stdout while we pipe each turn's user message to stdin.
-        self._hermes_proc = None
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         await self._ensure_started()
@@ -232,86 +229,135 @@ class DockerCLIAdapter(Adapter):
         return await session.run_turn(user_message, ctx.system_prompt)
 
     async def _run_turn_hermes(self, user_message: str, system_prompt: str) -> TurnResult:
-        """Hermes turn via a long-lived interactive ``hermes`` subprocess.
+        """One-shot hermes turn via ``hermes chat --provider anthropic
+        --quiet [--continue] -q <prompt>``.
 
-        Mirrors the Claude Code pattern: spawn once, keep it alive,
-        pipe each turn's user message on stdin, read the reply from
-        stdout. Hermes manages its own session continuity (per-HOME
-        ``~/.hermes/sessions/``) — we just talk to the running
-        process.
+        Why not a long-lived interactive subprocess like Claude Code:
+        hermes' interactive mode requires a real TTY and treats EOF
+        on piped stdin as "user quit". There is no stream-json-style
+        line protocol. The supported programmatic path is the
+        ``chat -q`` single-query form; multi-turn continuity works
+        through hermes' own on-disk session store + ``--continue``.
+        Cold start per turn is ~3-7 s.
 
-        On first ever worker start we spawn bare ``hermes``; on
-        daemon restart we spawn ``hermes -c`` to resume the most
-        recent session. If hermes rejects ``-c`` (our session-exists
-        sentinel and hermes' own session store can disagree — e.g.
-        the prior hermes process crashed before committing a
-        session), we clear our sentinel + dead proc and retry with
-        a fresh spawn. Single-level retry; if that fails too, we
-        surface the error.
+        Authentication: zero-config. Hermes auto-discovers the
+        Claude Code credential file we already bind-mount at
+        ``~/.claude/.credentials.json`` inside the container. The
+        access token rotates with the host's claude login; we don't
+        touch hermes' own auth store.
+
+        Session continuity:
+
+          * First turn: no ``--continue``; inline the system prompt
+            in the query text since hermes has no ``--system`` flag.
+          * Subsequent turns: ``--continue`` tells hermes to resume
+            its most recent session for this HOME.
+          * Sentinel: ``cli_session.json`` records "have we done at
+            least one turn". Stale sentinel (daemon restarted but
+            hermes' state.db missing / pruned) yields a
+            ``No previous CLI session found to continue`` error;
+            we detect that, clear the sentinel, and retry once.
         """
-        proc = await self._ensure_hermes_proc(system_prompt)
-        result = await _hermes_turn(proc, user_message, self.agent_id)
-        if _looks_like_stale_resume(result):
+        return await self._run_hermes_chat(user_message, system_prompt)
+
+    async def _run_hermes_chat(
+        self, user_message: str, system_prompt: str, *, _retried: bool = False,
+    ) -> TurnResult:
+        has_prior_session = self.session_file.exists()
+        prompt = user_message if has_prior_session else _stitch_hermes_prompt(
+            system_prompt, user_message,
+        )
+        cmd = [
+            "docker", "exec", "-i", self.container_name,
+            "hermes", "chat",
+            "--provider", "anthropic",
+            "--quiet",
+            "--source", f"puffoagent:{self.agent_id}",
+            "--model", _hermes_model_id(self.model),
+        ]
+        if has_prior_session:
+            cmd.append("--continue")
+        cmd.extend(["-q", prompt])
+
+        started = time.time()
+        rc, stdout, stderr = await _run_cmd(cmd, check=False)
+        elapsed = time.time() - started
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+
+        # Stale sentinel: hermes doesn't have a session matching our
+        # "we've done a turn before" marker. Clear + retry once with
+        # --continue dropped. ``_retried`` guards against loops if
+        # the error somehow persists on fresh spawn.
+        if (
+            rc != 0
+            and _HERMES_NO_RESUME_SIGNATURE in stdout_text
+            and not _retried
+        ):
             logger.info(
-                "agent %s: hermes rejected --continue (no prior session "
-                "in its store); clearing sentinel and spawning fresh",
+                "agent %s: hermes rejected --continue; clearing sentinel and retrying fresh",
                 self.agent_id,
             )
-            self._hermes_proc = None
             try:
                 self.session_file.unlink()
             except OSError:
                 pass
-            proc = await self._ensure_hermes_proc(system_prompt)
-            result = await _hermes_turn(proc, user_message, self.agent_id)
-        return result
+            return await self._run_hermes_chat(
+                user_message, system_prompt, _retried=True,
+            )
 
-    async def _ensure_hermes_proc(self, system_prompt: str):
-        """Spawn (or reuse) the long-lived interactive ``hermes`` in
-        the container. The container already has HOME pointing at the
-        per-agent ``.claude``/``.hermes`` dirs via bind mounts, so
-        hermes picks up Claude Code's credentials automatically.
+        if rc != 0:
+            logger.error(
+                "agent %s: hermes turn rc=%d in %.1fs | stdout: %r | stderr: %s",
+                self.agent_id, rc, elapsed,
+                stdout_text.strip()[:400],
+                stderr_text.strip()[-400:] or "(empty)",
+            )
+            return TurnResult(reply="", metadata={
+                "error": f"hermes exited rc={rc}",
+                "stdout_snippet": stdout_text[:400],
+                "stderr_tail": stderr_text[-400:],
+            })
 
-        The ``system_prompt`` is dropped into ``.hermes/SOUL.md`` (the
-        hermes equivalent of CLAUDE.md) before first spawn so the
-        agent identity carries through every turn without inlining
-        it into each user message.
-        """
-        if self._hermes_proc is not None and self._hermes_proc.returncode is None:
-            return self._hermes_proc
-        _seed_hermes_soul(self.agent_home_dir, system_prompt)
-        _seed_hermes_config(self.agent_home_dir, self.model)
-        has_prior_session = self.session_file.exists()
-        cmd = ["docker", "exec", "-i", self.container_name, "hermes"]
-        if has_prior_session:
-            cmd.append("-c")  # --continue, resume most recent session
-        logger.info(
-            "agent %s: spawning hermes %s",
-            self.agent_id, "(resume)" if has_prior_session else "(new)",
-        )
-        self._hermes_proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        reply, session_id = _parse_hermes_reply(stdout_text)
+        if not reply:
+            logger.warning(
+                "agent %s: hermes rc=0 but parser found no reply. "
+                "stdout: %r", self.agent_id, stdout_text[:400],
+            )
+
+        # First-ever successful turn: drop the sentinel so subsequent
+        # turns pass --continue. Include the session_id for
+        # post-hoc debugging (lets us cross-reference hermes'
+        # sessions/ dir with our agent).
         if not has_prior_session:
             try:
                 self.session_file.parent.mkdir(parents=True, exist_ok=True)
                 self.session_file.write_text(
                     json.dumps({
                         "harness": "hermes",
-                        "spawned_at": int(time.time()),
+                        "session_id": session_id,
+                        "first_turn_at": int(time.time()),
                     }) + "\n",
                     encoding="utf-8",
                 )
             except OSError as exc:
                 logger.warning(
-                    "agent %s: couldn't mark hermes session_file: %s "
-                    "(next daemon restart will spawn a fresh session)",
+                    "agent %s: couldn't write hermes session_file: %s "
+                    "(next turn will start a fresh session)",
                     self.agent_id, exc,
                 )
-        return self._hermes_proc
+
+        logger.info(
+            "agent %s: hermes turn rc=0 in %.1fs, %d reply chars, "
+            "session=%s, resume=%s",
+            self.agent_id, elapsed, len(reply), session_id or "?",
+            has_prior_session,
+        )
+        return TurnResult(reply=reply, metadata={
+            "harness": "hermes",
+            "session_id": session_id,
+        })
 
     async def warm(self, system_prompt: str) -> None:
         """Start the container + claude subprocess eagerly at daemon
@@ -434,8 +480,6 @@ class DockerCLIAdapter(Adapter):
         if self._session is not None:
             await self._session.aclose()
             self._session = None
-        await _kill_hermes_proc(self._hermes_proc, self.agent_id)
-        self._hermes_proc = None
         if not self._started:
             return
         await _run_cmd(["docker", "rm", "-f", self.container_name], check=False)
@@ -718,52 +762,6 @@ class DockerCLIAdapter(Adapter):
             )
 
 
-# How long to wait after the last stdout byte before deciding
-# hermes is done emitting a reply. Conservative — hermes can stream
-# tokens with visible latency, and a too-short idle window would
-# cut replies off mid-word. 4 s strikes a balance between
-# responsiveness and over-aggressive truncation. Revisit if we
-# see end-of-turn races in practice.
-_HERMES_IDLE_TIMEOUT_SECONDS = 4.0
-
-# Absolute ceiling on how long we'll wait for a hermes reply before
-# giving up. Even a multi-tool-call turn shouldn't exceed this.
-_HERMES_TURN_TIMEOUT_SECONDS = 300.0
-
-
-def _seed_hermes_soul(agent_home: Path, system_prompt: str) -> None:
-    """Mirror our managed CLAUDE.md-equivalent into ``.hermes/SOUL.md``
-    so hermes' interactive session starts with the agent's identity.
-    Overwrite every spawn — the system prompt is deterministic and
-    regenerating at worker start is how puffoagent stays the
-    source of truth for profile + memory layering."""
-    if not system_prompt:
-        return
-    soul = agent_home / ".hermes" / "SOUL.md"
-    try:
-        soul.parent.mkdir(parents=True, exist_ok=True)
-        soul.write_text(system_prompt, encoding="utf-8")
-    except OSError as exc:
-        logger.warning("couldn't seed hermes SOUL.md at %s: %s", soul, exc)
-
-
-def _seed_hermes_config(agent_home: Path, model: str) -> None:
-    """Write a minimal ``.hermes/config.yaml`` selecting Anthropic as
-    the provider so hermes picks up Claude Code's credential store
-    (``$HOME/.claude/.credentials.json``, auto-discovered). Lets us
-    skip the interactive ``hermes model`` wizard inside the
-    container."""
-    cfg = agent_home / ".hermes" / "config.yaml"
-    try:
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        body = ["model:", "  provider: anthropic"]
-        if model:
-            body.append(f"  default: {model}")
-        cfg.write_text("\n".join(body) + "\n", encoding="utf-8")
-    except OSError as exc:
-        logger.warning("couldn't seed hermes config.yaml at %s: %s", cfg, exc)
-
-
 # Daemon-wide lock around ``docker build -t <tag>``. Serialises
 # concurrent cli-docker workers that all hit ``_ensure_image`` at
 # the same time (e.g. right after an image-tag bump like v6 -> v7).
@@ -780,156 +778,72 @@ async def _image_exists_locally(tag: str) -> bool:
     return rc == 0
 
 
-async def _kill_hermes_proc(proc, agent_id: str) -> None:
-    """Terminate a long-lived hermes subprocess on adapter shutdown.
-    No-op if there's no proc or it already exited. Gives hermes 3s
-    to flush any in-flight output before SIGKILL.
-    """
-    if proc is None or proc.returncode is not None:
-        return
-    try:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-    except (ProcessLookupError, OSError) as exc:
-        logger.debug("agent %s: hermes teardown: %s", agent_id, exc)
-
-
-async def _hermes_turn(proc, user_message: str, agent_id: str):
-    """Send ``user_message`` to an open hermes subprocess on stdin,
-    then read stdout until it goes idle for _HERMES_IDLE_TIMEOUT
-    seconds. Returns a ``TurnResult``.
-
-    Hermes' interactive stdout is free-form text — no structured
-    delimiter like claude's stream-json ``result`` event. An idle
-    window is the least-bad signal that the agent is done talking.
-    If this proves racy in practice we'll upgrade to a prompt-
-    marker read (``> `` or similar) once we've seen the actual
-    output shape.
-
-    We drain stderr concurrently so hermes' own diagnostics aren't
-    lost when the process exits early — without this, a config
-    error or missing-credentials banner just looked like a silent
-    same-size reply every turn.
-    """
-    started = time.time()
-    if proc.stdin is None or proc.stdout is None:
-        return TurnResult(reply="", metadata={
-            "error": "hermes subprocess has no stdin/stdout",
-        })
-    stderr_task = asyncio.ensure_future(_drain(proc.stderr)) if proc.stderr else None
-    try:
-        proc.stdin.write(user_message.encode("utf-8") + b"\n")
-        await proc.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError) as exc:
-        logger.error("agent %s: hermes stdin write failed: %s", agent_id, exc)
-        err_tail = await _cancel_and_collect(stderr_task)
-        if err_tail:
-            logger.error("agent %s: hermes stderr: %s", agent_id, err_tail[-600:])
-        return TurnResult(reply="", metadata={
-            "error": f"hermes stdin closed: {exc}",
-        })
-
-    deadline = started + _HERMES_TURN_TIMEOUT_SECONDS
-    chunks: list[bytes] = []
-    exited_early = False
-    while True:
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            logger.warning(
-                "agent %s: hermes turn hit %.0fs ceiling; returning partial reply",
-                agent_id, _HERMES_TURN_TIMEOUT_SECONDS,
-            )
-            break
-        try:
-            chunk = await asyncio.wait_for(
-                proc.stdout.read(4096),
-                timeout=min(_HERMES_IDLE_TIMEOUT_SECONDS, remaining),
-            )
-        except asyncio.TimeoutError:
-            # Idle window reached — assume hermes is done.
-            break
-        if not chunk:
-            # EOF — process exited mid-turn. Capture returncode +
-            # stderr for the log so we can see WHY it died instead
-            # of just seeing "42 reply chars" every time.
-            exited_early = True
-            break
-        chunks.append(chunk)
-
-    elapsed = time.time() - started
-    reply = b"".join(chunks).decode("utf-8", errors="replace").strip()
-    err_tail = await _cancel_and_collect(stderr_task)
-    if exited_early:
-        rc = proc.returncode
-        logger.error(
-            "agent %s: hermes exited mid-turn in %.1fs (rc=%s). "
-            "stdout snippet: %r | stderr tail: %s",
-            agent_id, elapsed, rc, reply[:400], (err_tail or "(empty)")[-600:],
-        )
-        return TurnResult(reply="", metadata={
-            "error": f"hermes exited rc={rc}",
-            "stdout_snippet": reply[:400],
-            "stderr_tail": (err_tail or "")[-600:],
-        })
-    logger.info(
-        "agent %s: hermes turn done in %.1fs, %d reply chars | preview: %r",
-        agent_id, elapsed, len(reply), reply[:200],
-    )
-    if err_tail:
-        logger.info("agent %s: hermes stderr: %s", agent_id, err_tail[-400:])
-    return TurnResult(reply=reply, metadata={"harness": "hermes"})
-
-
-# hermes prints this exact line to stdout and exits rc=1 when ``-c``
-# is passed but it has no resumable session in ``~/.hermes/sessions/``.
-# Our session-exists sentinel (``cli_session.json``) can get out of sync
-# — e.g. the prior hermes process crashed before committing a session —
-# so we detect the case and fall back to a fresh spawn.
+# hermes prints this exact line to stdout and exits rc=1 when
+# ``--continue`` is passed but its session store has nothing to
+# resume. Our session-exists sentinel (``cli_session.json``) can
+# get out of sync — e.g. ``~/.hermes/sessions/`` was pruned — so
+# we detect the case and fall back to a fresh ``hermes chat``.
 _HERMES_NO_RESUME_SIGNATURE = "No previous CLI session found to continue"
 
-
-def _looks_like_stale_resume(result: TurnResult) -> bool:
-    """True when hermes exited rc=1 solely because ``-c`` pointed at
-    nothing resumable. Caller clears its sentinel + respawns without
-    ``-c``. Deliberately narrow: we don't want to retry on unrelated
-    crashes (e.g. missing credentials) because that would just loop."""
-    if not result.metadata.get("error"):
-        return False
-    snippet = result.metadata.get("stdout_snippet") or ""
-    return _HERMES_NO_RESUME_SIGNATURE in snippet
+# ``session_id: <id>`` appears in hermes's --quiet stdout right
+# before the reply body. We use it as both the reply boundary
+# (everything after is the reply) and as a value to persist
+# alongside our sentinel for post-hoc debugging.
+_HERMES_SESSION_ID_RE = re.compile(r"^session_id:\s*(\S+)\s*$")
 
 
-async def _drain(stream) -> bytes:
-    """Read a subprocess stream until EOF. Used for stderr so
-    hermes' diagnostics aren't lost when it exits — we cancel/
-    collect just before returning the turn."""
-    chunks: list[bytes] = []
-    try:
-        while True:
-            chunk = await stream.read(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    except asyncio.CancelledError:
-        pass
-    return b"".join(chunks)
+def _hermes_model_id(model: str) -> str:
+    """Translate the agent's ``runtime.model`` into the ``<provider>/
+    <model>`` form ``hermes chat --model`` expects.
+
+    Strips Claude-Code-isms we might carry forward (e.g. the
+    ``[1m]`` 1M-context suffix on ``claude-opus-4-6[1m]``) since
+    hermes rejects unrecognised suffixes. Prepends ``anthropic/``
+    if the caller didn't. Empty / missing → a reasonable default.
+    """
+    base = (model or "").split("[", 1)[0].strip()
+    if not base:
+        return "anthropic/claude-opus-4-6"
+    return base if "/" in base else f"anthropic/{base}"
 
 
-async def _cancel_and_collect(task) -> str:
-    """Stop a background drain task and return whatever it had read
-    so far. Decodes as utf-8 for log-friendliness."""
-    if task is None:
-        return ""
-    task.cancel()
-    try:
-        data = await task
-    except (asyncio.CancelledError, Exception):
-        data = b""
-    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else ""
+def _stitch_hermes_prompt(system_prompt: str, user_message: str) -> str:
+    """Hermes ``chat -q`` has no ``--system`` equivalent. On the first
+    turn of a session we inline the system prompt above the user
+    message with a visible separator so Claude can distinguish
+    persona from request. On subsequent turns ``--continue`` carries
+    session context and the caller passes just the user_message
+    through — no need to re-send the system prompt."""
+    if not system_prompt:
+        return user_message
+    return f"{system_prompt}\n\n---\n\n{user_message}"
+
+
+def _parse_hermes_reply(stdout_text: str) -> tuple[str, str]:
+    """Pull the reply + session id out of ``hermes chat --quiet``
+    stdout.
+
+    Shape (with --quiet suppressing banner/spinner):
+
+        ⚠️  Normalized model 'anthropic/...' to '...' for anthropic.
+        [↻ Resumed session <id> (...)]  <-- only on --continue
+
+        session_id: <id>
+        <reply body — may span multiple lines>
+
+    The ``session_id:`` line is the reliable reply boundary;
+    everything after it is the reply. Returns empty strings if
+    parsing fails so the caller can log the raw stdout for
+    debugging instead of invisibly returning garbage.
+    """
+    lines = stdout_text.splitlines()
+    for i, line in enumerate(lines):
+        m = _HERMES_SESSION_ID_RE.match(line)
+        if m:
+            session_id = m.group(1)
+            reply = "\n".join(lines[i + 1:]).strip()
+            return reply, session_id
+    return "", ""
 
 
 async def _run_cmd(cmd: list[str], check: bool = True) -> tuple[int, bytes, bytes]:

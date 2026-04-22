@@ -192,3 +192,151 @@ def test_harness_empty_means_backward_compat_not_blocked():
         assert "only supported under" not in str(exc), (
             f"empty harness should not trigger the guard: {exc}"
         )
+
+
+# ── Hermes subprocess helpers (parse / normalize / stitch) ───────────────────
+#
+# The docker adapter calls ``hermes chat --quiet -q ...`` per turn and
+# parses stdout. The pure helpers below are what the parsing relies on;
+# testing them without a live container ensures the shape assumptions
+# are explicit and easy to revisit if hermes changes its output.
+
+
+def test_hermes_model_id_strips_claude_code_suffix():
+    from puffoagent.agent.adapters.docker_cli import _hermes_model_id
+    # d2d2-style input: claude-code's [1m] context-window suffix
+    # isn't known to hermes and would be rejected.
+    assert _hermes_model_id("claude-opus-4-6[1m]") == "anthropic/claude-opus-4-6"
+
+
+def test_hermes_model_id_prepends_anthropic_prefix_when_missing():
+    from puffoagent.agent.adapters.docker_cli import _hermes_model_id
+    assert _hermes_model_id("claude-sonnet-4-6") == "anthropic/claude-sonnet-4-6"
+
+
+def test_hermes_model_id_keeps_explicit_provider_prefix():
+    from puffoagent.agent.adapters.docker_cli import _hermes_model_id
+    # If someone already passes the full form, don't double-prefix.
+    assert _hermes_model_id("openrouter/anthropic/claude-opus-4-6") == \
+        "openrouter/anthropic/claude-opus-4-6"
+
+
+def test_hermes_model_id_empty_returns_default():
+    from puffoagent.agent.adapters.docker_cli import _hermes_model_id
+    # Empty / missing model → a sensible default so hermes always
+    # gets a concrete --model flag.
+    assert _hermes_model_id("").startswith("anthropic/")
+    assert _hermes_model_id(None).startswith("anthropic/")  # type: ignore[arg-type]
+
+
+def test_parse_hermes_reply_first_turn():
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = (
+        "⚠️  Normalized model 'anthropic/claude-opus-4-6' to 'claude-opus-4-6' for \n"
+        "anthropic.\n"
+        "\n"
+        "session_id: 20260422_214146_02b4d1\n"
+        "🚀✨🎯"
+    )
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert reply == "🚀✨🎯"
+    assert session_id == "20260422_214146_02b4d1"
+
+
+def test_parse_hermes_reply_resumed_turn():
+    """--continue adds a ``↻ Resumed session`` line before session_id.
+    Parser must still pick up the reply after session_id, not confuse
+    the resume marker for the reply body."""
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = (
+        "⚠️  Normalized model 'anthropic/claude-opus-4-6' to 'claude-opus-4-6' for \n"
+        "anthropic.\n"
+        "↻ Resumed session 20260422_213753_5d42f9 (1 user message, 2 total messages)\n"
+        "\n"
+        "session_id: 20260422_213753_5d42f9\n"
+        "Hello there, how are you?"
+    )
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert reply == "Hello there, how are you?"
+    assert session_id == "20260422_213753_5d42f9"
+
+
+def test_parse_hermes_reply_multiline_body():
+    """Replies can span multiple lines; parser should preserve
+    newlines between them."""
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = (
+        "session_id: abc\n"
+        "line one\n"
+        "line two\n"
+        "line three"
+    )
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert reply == "line one\nline two\nline three"
+    assert session_id == "abc"
+
+
+def test_parse_hermes_reply_no_session_id_returns_empty():
+    """If hermes output is malformed (e.g. error banner without the
+    session_id marker), parser returns empties so the caller can log
+    the raw stdout rather than silently returning garbage."""
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = "some error text\nno session id here"
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert reply == ""
+    assert session_id == ""
+
+
+def test_stitch_hermes_prompt_first_turn():
+    """First turn: system prompt inlined above the user message with
+    a visible separator. Hermes has no --system flag for chat -q so
+    this is how persona lands in the model's context."""
+    from puffoagent.agent.adapters.docker_cli import _stitch_hermes_prompt
+    stitched = _stitch_hermes_prompt("You are Puffo.", "hello")
+    assert stitched == "You are Puffo.\n\n---\n\nhello"
+
+
+def test_stitch_hermes_prompt_no_system_passes_through():
+    """Empty system prompt → pass user_message through unchanged.
+    Don't add a stray separator at the top."""
+    from puffoagent.agent.adapters.docker_cli import _stitch_hermes_prompt
+    assert _stitch_hermes_prompt("", "hello") == "hello"
+    assert _stitch_hermes_prompt(None, "hello") == "hello"  # type: ignore[arg-type]
+
+
+# ── cli-local rejects harness=hermes ─────────────────────────────────────────
+
+
+def test_local_cli_rejects_hermes_harness():
+    """cli-local doesn't support hermes yet — rejecting at adapter
+    construction makes the constraint obvious in the daemon log
+    rather than silently doing something confusing."""
+    from puffoagent.agent.adapters.local_cli import LocalCLIAdapter
+    with pytest.raises(RuntimeError, match="not.+supported.+cli-local"):
+        LocalCLIAdapter(
+            agent_id="t",
+            model="",
+            workspace_dir="/tmp/ws",
+            claude_dir="/tmp/ws/.claude",
+            session_file="/tmp/sess.json",
+            mcp_config_file="/tmp/mcp.json",
+            agent_home_dir="/tmp/agent",
+            harness=HermesHarness(),
+        )
+
+
+def test_local_cli_accepts_claude_code_harness():
+    """Sanity check: the constructor's harness check doesn't
+    false-positive on the default case."""
+    from puffoagent.agent.adapters.local_cli import LocalCLIAdapter
+    # Should NOT raise.
+    LocalCLIAdapter(
+        agent_id="t",
+        model="",
+        workspace_dir="/tmp/ws",
+        claude_dir="/tmp/ws/.claude",
+        session_file="/tmp/sess.json",
+        mcp_config_file="/tmp/mcp.json",
+        agent_home_dir="/tmp/agent",
+        harness=ClaudeCodeHarness(),
+    )
