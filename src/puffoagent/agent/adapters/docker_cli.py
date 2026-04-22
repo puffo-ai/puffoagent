@@ -219,6 +219,12 @@ class DockerCLIAdapter(Adapter):
         self._started_lock = asyncio.Lock()
         self._started = False
         self._session: ClaudeSession | None = None
+        # Has the puffo MCP server been registered with the
+        # container's hermes config yet? Flipped by
+        # ``_ensure_hermes_mcp_registered`` on first turn after a
+        # worker restart. Registration is idempotent (remove + add)
+        # so re-runs are safe if the flag gets out of sync.
+        self._hermes_mcp_registered = False
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         await self._ensure_started()
@@ -260,6 +266,91 @@ class DockerCLIAdapter(Adapter):
         """
         return await self._run_hermes_chat(user_message, system_prompt)
 
+    async def _ensure_hermes_mcp_registered(self) -> None:
+        """Register the puffo MCP server with the in-container hermes
+        config so chat turns can call ``send_message`` /
+        ``get_channel_history`` / other puffo tools.
+
+        Same tool surface claude-code agents get via ``--mcp-config``;
+        hermes uses its own ``hermes mcp add`` registry persisted at
+        ``/home/agent/.hermes/config.yaml``. That path lives in the
+        bind-mounted agent_home dir, so registration survives
+        container restarts within a daemon lifetime — but we
+        re-register on every adapter-instance start anyway so a
+        rotated bot token or a changed config shape is picked up
+        automatically.
+
+        The registration is done via ``hermes mcp add`` which,
+        annoyingly, prompts "Enable all N tools? [Y/n/select]"
+        before writing config. We pipe ``y\\n`` on stdin to accept.
+        Silent failure just disables tool calling for this session
+        (hermes will still reply, just without tools); we log but
+        don't hard-fail the turn.
+        """
+        if self._hermes_mcp_registered:
+            return
+        env = mcp_env(
+            agent_id=self.agent_id,
+            url=self.mattermost_url,
+            token=self.mattermost_token,
+            workspace="/workspace",
+            team=self.team,
+            owner_username=self.owner_username,
+            runtime_kind="cli-docker",
+            harness="hermes",
+        )
+        env_flags: list[str] = [f"{k}={v}" for k, v in env.items()]
+
+        # Remove an existing puffo registration first (from a prior
+        # worker lifetime) so the add below overwrites stale env
+        # (rotated bot token, renamed agent, etc.) cleanly. rc!=0
+        # is fine — means there wasn't one.
+        await _run_cmd(
+            [
+                "docker", "exec", self.container_name,
+                "hermes", "mcp", "remove", "puffo",
+            ],
+            check=False,
+        )
+
+        cmd = [
+            "docker", "exec", "-i", self.container_name,
+            "hermes", "mcp", "add", "puffo",
+            "--command", "python3",
+            "--args", "/opt/puffoagent-mcp/puffo_tools.py",
+            "--env", *env_flags,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate(b"y\n")
+        except Exception as exc:
+            logger.warning(
+                "agent %s: couldn't register puffo MCP with hermes: %s "
+                "(chat will work, tool calls won't)",
+                self.agent_id, exc,
+            )
+            return
+        if proc.returncode != 0:
+            logger.warning(
+                "agent %s: hermes mcp add puffo rc=%d | stdout: %s | stderr: %s "
+                "(chat will work, tool calls won't)",
+                self.agent_id, proc.returncode,
+                stdout.decode("utf-8", errors="replace").strip()[-400:],
+                stderr.decode("utf-8", errors="replace").strip()[-400:],
+            )
+            return
+        logger.info(
+            "agent %s: registered puffo MCP server with hermes "
+            "(18 tools available via hermes chat)",
+            self.agent_id,
+        )
+        self._hermes_mcp_registered = True
+
     async def _run_hermes_chat(
         self, user_message: str, system_prompt: str, *, _retried: bool = False,
     ) -> TurnResult:
@@ -295,6 +386,12 @@ class DockerCLIAdapter(Adapter):
             return TurnResult(reply="", metadata={
                 "error": "no Claude Code access token available on host",
             })
+
+        # Make sure hermes knows about the puffo MCP server so the
+        # agent can call send_message / get_channel_history / etc.
+        # during this turn. Idempotent — skipped after the first
+        # successful registration per adapter instance.
+        await self._ensure_hermes_mcp_registered()
 
         has_prior_session = self.session_file.exists()
         prompt = user_message if has_prior_session else _stitch_hermes_prompt(
