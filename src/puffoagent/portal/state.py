@@ -435,6 +435,16 @@ def cli_session_json_path(agent_id: str) -> Path:
     return agent_dir(agent_id) / "cli_session.json"
 
 
+def archive_flag_path(agent_id: str) -> Path:
+    """Sentinel the worker drops when its Puffo space (Mattermost
+    team) is deleted server-side. The daemon reconciler picks this
+    up on its next tick, stops the worker, and moves the agent dir
+    to ``archived/``. Serves as a defensive layer on top of the
+    /aiagents server sync in case the server-side cascade doesn't
+    fire (or fires late)."""
+    return agent_dir(agent_id) / ".puffoagent" / "archive.flag"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataclasses
 # ─────────────────────────────────────────────────────────────────────────────

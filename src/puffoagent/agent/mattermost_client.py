@@ -82,11 +82,18 @@ class MattermostClient:
         file_server_url: str = "",
         agent_id: str = "",
         workspace_dir: str = "",
+        team_name: str = "",
     ):
         self.url = url.rstrip("/")
         self.token = token
         self.profile_name = profile_name
         self.file_server_url = file_server_url
+        self.team_name = team_name
+        # Populated in ``listen()`` after ``_get_me`` via
+        # ``resolve_team_id``; compared against incoming
+        # ``delete_team`` websocket events so the worker can
+        # archive itself when its own Puffo space is removed.
+        self.team_id: str = ""
         self.ws_url = self.url.replace("http://", "ws://").replace("https://", "wss://") + "/api/v4/websocket"
         self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         # Attachments on incoming posts get downloaded under
@@ -109,6 +116,12 @@ class MattermostClient:
         self._queue: asyncio.PriorityQueue | None = None
         self._queue_seq = 0
         self._rpc_handler = None  # set by the agent to serve file RPC calls
+        # Called on ``delete_team`` websocket events so the worker can
+        # archive its agent if the server just removed its Puffo space.
+        # Defensive: server-side cascade of agent deletion should also
+        # trigger local archive via the /aiagents sync, but we don't
+        # want a stuck session if the cascade is delayed or skipped.
+        self._team_deleted_handler = None
         self._background_tasks: list[asyncio.Task] = []
         self.logger = agent_logger(__name__, agent_id)
 
@@ -118,6 +131,33 @@ class MattermostClient:
             self.bot_user_id = data["id"]
             self.bot_username = data["username"]
             self.logger.info(f"Logged in as @{self.bot_username} ({self.bot_user_id})")
+
+    async def resolve_team_id(
+        self, session: aiohttp.ClientSession, team_name: str,
+    ) -> str:
+        """Look up a team by name. Returns the team id or ``""`` if
+        the name is empty / the lookup fails. Used by the worker at
+        startup to stash the bot's own team id so a later
+        ``delete_team`` websocket event can be matched without a
+        second round-trip."""
+        if not team_name:
+            return ""
+        try:
+            async with session.get(
+                f"{self.url}/api/v4/teams/name/{team_name}",
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    self.logger.warning(
+                        "team lookup for %r returned %s: %s",
+                        team_name, resp.status, body[:200],
+                    )
+                    return ""
+                data = await resp.json()
+                return (data.get("id") or "").strip()
+        except Exception as exc:
+            self.logger.warning("team lookup for %r failed: %s", team_name, exc)
+            return ""
 
     async def _register_as_ai_agent(self, session: aiohttp.ClientSession):
         """Register with the server's AIAgents table via POST /aiagents/register.
@@ -318,6 +358,14 @@ class MattermostClient:
         """
         self._rpc_handler = handler
 
+    def set_team_deleted_handler(self, handler):
+        """Register an async callable that fires on ``delete_team``
+        websocket events. Receives the ``team_id`` as its only
+        argument; returns nothing. Exceptions are caught and logged
+        so a misbehaving handler doesn't crash the listen loop.
+        """
+        self._team_deleted_handler = handler
+
     async def _handle_rpc_request(self, event: dict):
         data = event.get("data", {}) or {}
         request_id = data.get("request_id", "")
@@ -481,6 +529,12 @@ class MattermostClient:
         """
         async with aiohttp.ClientSession(headers=self.headers) as session:
             await self._get_me(session)
+            # Resolve team_name -> team_id so delete_team events can
+            # be matched. One-time lookup at listen start — the team
+            # name from agent.yml is stable, and a later team rename
+            # would be surfaced by the delete+create event pair.
+            if self.team_name:
+                self.team_id = await self.resolve_team_id(session, self.team_name)
             await self._register_as_ai_agent(session)
             # Mark the bot user online immediately so the presence
             # dot lights up within seconds of daemon start. The
@@ -549,6 +603,23 @@ class MattermostClient:
 
         if event_type == "ai_agent_rpc_request":
             await self._handle_rpc_request(event)
+            return
+
+        if event_type == "delete_team":
+            # Server-side broadcast scoped to team members — we get
+            # it when one of the bot's teams (a Puffo "space") was
+            # deleted. Hand the team_id to the worker so it can
+            # archive itself if the match is its own team.
+            data = event.get("data") or {}
+            team_id = (data.get("team_id") or "").strip()
+            if self._team_deleted_handler and team_id:
+                try:
+                    await self._team_deleted_handler(team_id)
+                except Exception as exc:
+                    self.logger.warning(
+                        "team_deleted handler error for team %s: %s",
+                        team_id, exc,
+                    )
             return
 
         if event_type != "posted":

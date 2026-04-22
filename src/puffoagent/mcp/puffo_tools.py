@@ -425,11 +425,45 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
+def _format_http_error(method: str, path: str, status: int, body: str) -> str:
+    """Translate a non-2xx Mattermost response into an actionable
+    message the LLM can read in a tool result.
+
+    403 and 404 on a channel / post / team endpoint usually mean the
+    bot lost membership (removed from the channel or team) or the
+    target was deleted. Both are *terminal* from the tool's
+    perspective — retrying the same call will keep failing until an
+    operator fixes the membership. The phrasing tells the LLM to
+    stop retrying rather than loop back into the same call.
+
+    All other statuses just surface the raw body; those are usually
+    transient (5xx server error, rate limits, etc.) where retrying
+    later makes sense.
+    """
+    snippet = (body or "")[:200]
+    if status == 403:
+        return (
+            f"{method} {path} -> 403 Forbidden: {snippet} "
+            "— your bot account likely lost membership in this channel "
+            "or team (an operator removed you). Do NOT retry the same "
+            "call; either address a different channel, ask the user to "
+            "re-invite the bot, or stop."
+        )
+    if status == 404:
+        return (
+            f"{method} {path} -> 404 Not Found: {snippet} "
+            "— the channel / post / user referenced was deleted or "
+            "never existed. Do NOT retry the same call; pick a "
+            "different target or stop."
+        )
+    return f"{method} {path} -> {status}: {snippet}"
+
+
 async def _get(session: aiohttp.ClientSession, url: str, path: str) -> Any:
     async with session.get(url.rstrip("/") + path) as resp:
         if resp.status != 200:
             body = await resp.text()
-            raise RuntimeError(f"GET {path} -> {resp.status}: {body[:200]}")
+            raise RuntimeError(_format_http_error("GET", path, resp.status, body))
         return await resp.json()
 
 
@@ -439,7 +473,7 @@ async def _post(
     async with session.post(url.rstrip("/") + path, json=payload) as resp:
         if resp.status not in (200, 201):
             body = await resp.text()
-            raise RuntimeError(f"POST {path} -> {resp.status}: {body[:200]}")
+            raise RuntimeError(_format_http_error("POST", path, resp.status, body))
         return await resp.json()
 
 
@@ -589,7 +623,7 @@ async def _upload_file_bytes(
     ) as resp:
         if resp.status not in (200, 201):
             body = await resp.text()
-            raise RuntimeError(f"file upload -> {resp.status}: {body[:200]}")
+            raise RuntimeError(_format_http_error("POST", "/api/v4/files", resp.status, body))
         body = await resp.json()
     return [fi["id"] for fi in body.get("file_infos") or []]
 

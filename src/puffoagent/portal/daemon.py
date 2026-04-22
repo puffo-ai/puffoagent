@@ -12,12 +12,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import signal
+import time
 
 from .state import (
     AgentConfig,
     DaemonConfig,
+    agent_dir,
     agents_dir,
+    archive_flag_path,
+    archived_dir,
     clear_daemon_pid,
     discover_agents,
     home_dir,
@@ -86,6 +91,19 @@ class Daemon:
             logger.info("agent %s: directory removed, stopping worker", agent_id)
             await self._stop_worker(agent_id)
 
+        # Agents whose worker asked to be archived (e.g., because
+        # their Puffo space was deleted server-side and the
+        # mattermost websocket fired ``delete_team``). Stop the
+        # worker, move the dir to ``archived/``, drop out of the
+        # reconcile loop for this agent — subsequent iterations
+        # will just not see it on disk.
+        archived_this_tick: set[str] = set()
+        for agent_id in sorted(on_disk):
+            if archive_flag_path(agent_id).exists():
+                await self._archive_on_flag(agent_id)
+                archived_this_tick.add(agent_id)
+        on_disk -= archived_this_tick
+
         # Agents on disk → check state and (start | stop | leave alone).
         for agent_id in sorted(on_disk):
             try:
@@ -126,6 +144,32 @@ class Daemon:
     async def _stop_all_workers(self) -> None:
         ids = list(self.workers.keys())
         await asyncio.gather(*(self._stop_worker(i) for i in ids), return_exceptions=True)
+
+    async def _archive_on_flag(self, agent_id: str) -> None:
+        """Worker dropped an ``archive.flag`` sentinel (server-side
+        space deletion, etc.). Stop the worker and move the agent
+        dir to ``archived/<id>-ws-<stamp>/``. The ``-ws-`` suffix
+        distinguishes this from operator-initiated archives (no
+        suffix) and sync-driven archives (``-sync-``)."""
+        logger.warning(
+            "agent %s: archive.flag detected, stopping worker + archiving",
+            agent_id,
+        )
+        await self._stop_worker(agent_id)
+        src = agent_dir(agent_id)
+        if not src.exists():
+            return
+        archived_dir().mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = archived_dir() / f"{agent_id}-ws-{stamp}"
+        try:
+            shutil.move(str(src), str(dest))
+            logger.info("agent %s: archived to %s", agent_id, dest)
+        except OSError as exc:
+            logger.error(
+                "agent %s: archive failed: %s (flag still present — will retry next tick)",
+                agent_id, exc,
+            )
 
 
 async def _log_outdated_version_warning() -> None:

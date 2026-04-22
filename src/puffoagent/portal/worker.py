@@ -39,6 +39,7 @@ from .state import (
     agent_claude_user_dir,
     agent_dir,
     agent_home_dir,
+    archive_flag_path,
     cli_session_json_path,
     docker_dir,
     docker_shared_dir,
@@ -289,8 +290,43 @@ class Worker:
                 file_server_url="",
                 agent_id=agent_id,
                 workspace_dir=workspace_path,
+                team_name=self.agent_cfg.mattermost.team_name,
             )
             client.set_rpc_handler(FileBrowser(str(agent_dir(agent_id))))
+
+            archive_flag = archive_flag_path(agent_id)
+
+            async def on_team_deleted(team_id: str) -> None:
+                """Defensive layer: if the bot's own team is deleted
+                server-side, drop an archive sentinel so the daemon
+                reconciler moves this agent to ``archived/`` on its
+                next tick. Safe even when the server cascades agent
+                deletion through /aiagents sync — this path is a
+                no-op if sync got there first.
+                """
+                if not client.team_id or team_id != client.team_id:
+                    return
+                logger.warning(
+                    "agent %s: own Puffo space (team_id=%s) was deleted "
+                    "server-side; writing archive.flag", agent_id, team_id,
+                )
+                try:
+                    archive_flag.parent.mkdir(parents=True, exist_ok=True)
+                    archive_flag.write_text(
+                        json.dumps({
+                            "reason": "team_deleted",
+                            "team_id": team_id,
+                            "at": int(time.time()),
+                        }) + "\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "agent %s: could not write archive.flag: %s",
+                        agent_id, exc,
+                    )
+
+            client.set_team_deleted_handler(on_team_deleted)
         except Exception as e:
             logger.error("agent %s: failed to initialise: %s", agent_id, e, exc_info=True)
             self.runtime.status = "error"
