@@ -204,7 +204,7 @@ Two operator-side knobs that complement the modes:
 
 Same CLI as `cli-local`, but inside its own sandboxed container. The container is the isolation boundary; `--dangerously-skip-permissions` is safe *inside* the container because the agent can't escape back to your host for file access.
 
-- **How:** on first use puffoagent builds `puffo/agent-runtime:v6` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
+- **How:** on first use puffoagent builds `puffo/agent-runtime:v7` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
   - One long-lived container, `puffo-<agent-id>`, runs as a non-root `agent` user.
   - The per-agent workspace (`~/.puffoagent/agents/<id>/workspace/`) is bind-mounted to `/workspace`.
   - The per-agent `.claude/` (`~/.puffoagent/agents/<id>/.claude/`) is bind-mounted to `/home/agent/.claude` — isolated sessions, history, and settings per agent.
@@ -215,6 +215,27 @@ Same CLI as `cli-local`, but inside its own sandboxed container. The container i
 - **Auth:** same `claude login` as `cli-local`. The host's `.credentials.json` is bind-mounted into every container; the rest of the agent's `~/.claude/` is per-agent. One host-side `claude login` covers every `cli-docker` agent, and a refresh performed by any agent (or the host CLI) updates the shared file for all.
 - **Safety model:** the container. The agent can `rm -rf /` all it wants; nothing outside the container is affected. The one thing that *does* persist across container restarts is `/workspace` (bind-mounted), so any files the agent wants to hand off should live there.
 - **Install:** Docker Desktop (Windows/macOS) or `docker-ce` (Linux) + `claude login` on the host once.
+
+### Harness (what runs inside the runtime)
+
+Runtime decides *where* the agent executes (host subprocess / docker container / in-process SDK). **Harness** decides *what* executes there. Two are shipped:
+
+| Harness | Binary | Session protocol | Tool surface |
+|---|---|---|---|
+| `claude-code` (default) | `claude` | stream-json + `--resume` | Full Claude Code skills/MCP/permission-mode suite; `install_skill`, `refresh`, etc. |
+| `hermes` | `hermes` | long-lived interactive subprocess (piped stdin/stdout); per-agent HOME ⇒ per-agent session | Hermes' own skills/memory/tools; Claude-Code-specific MCP tools short-circuit with a clear error |
+
+Only `cli-local` and `cli-docker` look at the harness field; `sdk` / `chat-only` ignore it.
+
+**Switch a cli-docker agent to Hermes:**
+
+```bash
+puffoagent agent runtime <agent-id> --harness hermes
+```
+
+On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v7` with `hermes-agent` pre-installed), seeds a minimal `~/.hermes/config.yaml` selecting the Anthropic native provider, and spawns `hermes` inside the container. Hermes auto-discovers Claude Code's credential store from `~/.claude/.credentials.json` — already linked there by puffoagent.
+
+**Caveat worth eyes:** Anthropic routes third-party OAuth clients (that's hermes) to its `extra_usage` billing pool, NOT your Claude subscription — same token, different ledger. See [NousResearch/hermes-agent#12905](https://github.com/NousResearch/hermes-agent/issues/12905).
 
 ### How to set an agent's runtime
 
@@ -239,6 +260,7 @@ $EDITOR ~/.puffoagent/agents/<agent-id>/agent.yml
 ```yaml
 runtime:
   kind: cli-docker             # chat-only | sdk | cli-local | cli-docker
+  harness: claude-code         # claude-code | hermes (cli-local / cli-docker only)
   model: claude-sonnet-4-6     # optional; defaults to daemon config
   api_key: ""                  # sdk / chat-only; CLI kinds ignore this
   allowed_tools: []            # sdk only; ignored by CLI kinds
@@ -406,7 +428,7 @@ Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are
 | **cli-local / cli-docker:** auth errors | `~/.claude/.credentials.json` is missing or stale. Run `claude login` on the host. For cli-local, `puffoagent agent refresh-ping <id>` dumps credential state + a full subprocess trace so you can see exactly what's failing. |
 | **cli-local:** `claude binary not found on PATH` | `npm install -g @anthropic-ai/claude-code`, then confirm `claude --version` works in a fresh shell. |
 | **cli-docker:** `docker binary not found on PATH` | Install Docker Desktop (Windows/macOS) or `docker-ce` (Linux) and make sure the Docker daemon is running. |
-| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded (expect `:v6`). |
+| **cli-docker:** first turn takes minutes | Expected — the image is building. Subsequent agents and turns reuse it. `docker images puffo/agent-runtime` confirms the build succeeded (expect `:v7`). |
 | **cli-docker:** `docker logs` is empty but audit.log has content | GNU `tail -F` can't see inotify events through Docker Desktop's Windows bind-mount. The bundled image already polls on a 1 s timer instead; if you run a custom image, replicate that pattern in your CMD. |
 | **cli-docker:** stale container from previous daemon | Puffoagent force-removes `puffo-<id>` on worker start, so this self-heals. If manual cleanup is needed: `docker rm -f puffo-<agent-id>`. |
 | Can't create a personal access token | Your admin hasn't enabled personal access tokens. They need to flip **System Console → Integrations → Integration Management → Enable Personal Access Tokens**. |

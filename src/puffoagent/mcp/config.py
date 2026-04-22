@@ -59,6 +59,7 @@ def mcp_env(
     owner_username: str = "",
     permission_timeout_seconds: float = 300.0,
     runtime_kind: str = "",
+    harness: str = "",
 ) -> dict[str, str]:
     """Env dict to pass to the MCP subprocess. Puts secrets in env
     rather than argv so they don't appear in process listings.
@@ -69,6 +70,11 @@ def mcp_env(
     host-local command paths inside ``cli-docker`` (they won't
     resolve in the container) but accepts them under ``cli-local``
     where the agent runs on the host.
+
+    ``harness`` propagates the agent engine (``claude-code`` /
+    ``hermes`` / ...) so tools that only make sense under Claude
+    Code (install_skill, refresh, project-scope .mcp.json writers)
+    can short-circuit with a clear message under other harnesses.
     """
     env: dict[str, str] = {
         "PUFFO_AGENT_ID": agent_id,
@@ -83,6 +89,8 @@ def mcp_env(
         env["PUFFO_OWNER_USERNAME"] = owner_username
     if runtime_kind:
         env["PUFFO_RUNTIME_KIND"] = runtime_kind
+    if harness:
+        env["PUFFO_HARNESS"] = harness
     return env
 
 

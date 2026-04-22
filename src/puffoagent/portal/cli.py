@@ -1138,12 +1138,16 @@ def cmd_agent_runtime(args: argparse.Namespace) -> int:
     if args.permission_mode is not None:
         cfg.runtime.permission_mode = args.permission_mode
         touched = True
+    if args.harness is not None:
+        cfg.runtime.harness = args.harness
+        touched = True
 
     if not touched:
         # No flags → just print. Matches `agent show`'s runtime lines.
         print(f"id:              {cfg.id}")
         print("runtime:")
         print(f"  kind:             {cfg.runtime.kind}")
+        print(f"  harness:          {cfg.runtime.harness}  (cli-local / cli-docker)")
         print(f"  provider:         {cfg.runtime.provider or '(default)'}")
         print(f"  model:            {cfg.runtime.model or '(default)'}")
         print(f"  api_key:          {'(set)' if cfg.runtime.api_key else '(inherit)'}")
@@ -1351,6 +1355,19 @@ def build_parser() -> argparse.ArgumentParser:
             "cli-local: Claude Code permission mode. 'default' routes all "
             "non-read tools through the MCP permission proxy (recommended). "
             "See https://code.claude.com/docs/en/permission-modes."
+        ),
+    )
+    runtime.add_argument(
+        "--harness",
+        choices=["claude-code", "hermes"],
+        help=(
+            "cli-local / cli-docker: which agent engine runs inside the "
+            "runtime. 'claude-code' (default) spawns the claude CLI with "
+            "our stream-json session protocol. 'hermes' spawns `hermes chat` "
+            "one-shot per turn against the Anthropic API using Claude "
+            "Code's credential store. Hermes OAuth routes to Anthropic's "
+            "extra_usage pool, NOT your Claude subscription — see "
+            "NousResearch/hermes-agent#12905."
         ),
     )
     runtime.set_defaults(func=cmd_agent_runtime)

@@ -413,6 +413,12 @@ class ToolsConfig:
     # Set via ``PUFFO_RUNTIME_KIND`` env var. Values:
     # ``cli-local``, ``cli-docker``, ``sdk``, or empty (unknown).
     runtime_kind: str = ""
+    # Which agent engine is running (``claude-code`` / ``hermes`` /
+    # empty). Claude-Code-specific tools — install_skill, refresh,
+    # the project-scope .mcp.json writer — short-circuit with a
+    # clear error when this isn't ``claude-code`` because their
+    # side effects only mean anything inside the Claude Code runtime.
+    harness: str = ""
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -1064,6 +1070,22 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
         )
 
     # ── Skill + MCP install / refresh tools ──────────────────────────────────
+    #
+    # These all assume Claude Code's skills-dir layout + --resume
+    # session protocol. Under a different harness (e.g. hermes) the
+    # side effects land on paths nobody reads, so we reject at the
+    # tool boundary instead of silently writing files that mislead
+    # the agent into thinking they'll take effect.
+
+    def _require_claude_code(tool: str) -> None:
+        if cfg.harness and cfg.harness != "claude-code":
+            raise RuntimeError(
+                f"{tool} is only supported under the claude-code "
+                f"harness (this agent is using {cfg.harness!r}). "
+                f"Skills and project-scope MCP registrations use "
+                f"Claude Code's own file layout and session protocol; "
+                f"under {cfg.harness!r} those files wouldn't be read."
+            )
 
     @mcp.tool()
     async def install_skill(name: str, content: str) -> str:
@@ -1090,6 +1112,7 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             ``description:``) followed by markdown instructions.
             See https://code.claude.com/docs/en/skills for the format.
         """
+        _require_claude_code("install_skill")
         dst = _install_skill(Path(cfg.workspace), name, content)
         return (
             f"installed skill {name!r} at project scope ({dst}). "
@@ -1109,6 +1132,7 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
         Args:
           name: the skill slug to remove.
         """
+        _require_claude_code("uninstall_skill")
         _uninstall_skill(Path(cfg.workspace), name)
         return (
             f"uninstalled skill {name!r}. Call refresh() so your next "
@@ -1180,6 +1204,7 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
         # cli-local: agent runs on the host, so host paths resolve —
         # skip the host-local rejection (it would fire false-positive
         # on workspace-script MCPs under /home/<operator>/...).
+        _require_claude_code("install_mcp_server")
         check_host_local = cfg.runtime_kind != "cli-local"
         path = _install_mcp_server(
             Path(cfg.workspace), name, command, args, env,
@@ -1202,6 +1227,7 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
         Args:
           name: the server name to remove.
         """
+        _require_claude_code("uninstall_mcp_server")
         _uninstall_mcp_server(Path(cfg.workspace), name)
         return (
             f"removed MCP server {name!r}. Call refresh() so the claude "
@@ -1259,6 +1285,7 @@ def build_server(cfg: ToolsConfig) -> FastMCP:
             string to clear back to the daemon default. Omit to keep
             the current model.
         """
+        _require_claude_code("refresh")
         _write_refresh_flag(Path(cfg.workspace), model)
         tail = f" (model override: {model!r})" if model is not None else ""
         return (
@@ -1383,6 +1410,16 @@ def _cfg_from_args() -> ToolsConfig:
              "checks like the host-local-command rejection in "
              "install_mcp_server.",
     )
+    parser.add_argument(
+        "--harness",
+        default=os.environ.get("PUFFO_HARNESS", ""),
+        choices=("", "claude-code", "hermes"),
+        help="Which agent engine is running. Tools that only make "
+             "sense under Claude Code (install_skill / refresh / "
+             "install_mcp_server) return a clear error under "
+             "other harnesses rather than writing to paths Claude "
+             "Code owns.",
+    )
     args = parser.parse_args()
 
     missing = [
@@ -1404,6 +1441,7 @@ def _cfg_from_args() -> ToolsConfig:
         owner_username=args.owner_username,
         permission_timeout_seconds=args.permission_timeout,
         runtime_kind=args.runtime_kind,
+        harness=args.harness,
     )
 
 

@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 # a rebuild without the user having to remember to prune the old
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
-DEFAULT_IMAGE = "puffo/agent-runtime:v6"
+DEFAULT_IMAGE = "puffo/agent-runtime:v7"
 
 # Timeout for the refresh one-shot. A cold claude + OAuth refresh
 # round-trip + one-turn API call normally lands in 5-15s, but can
@@ -127,8 +127,15 @@ RUN npm install -g @anthropic-ai/claude-code
 # Python-packaged MCP servers. Having both on PATH lets agents
 # register any stdio MCP via install_mcp_server without needing
 # a per-server pip/npm install step.
+#
+# ``hermes-agent`` is the second harness we ship (alongside claude-
+# code). When an agent sets ``runtime.harness=hermes`` puffoagent
+# spawns ``hermes chat -q`` inside this container; it auto-discovers
+# our linked ``~/.claude/.credentials.json`` and calls the Anthropic
+# API directly. Heads-up: billing routes to Anthropic's extra_usage
+# pool (NousResearch/hermes-agent#12905), NOT the Claude subscription.
 RUN pip3 install --break-system-packages --no-cache-dir \\
-        "mcp>=1.0" "aiohttp>=3.9" "uv>=0.5"
+        "mcp>=1.0" "aiohttp>=3.9" "uv>=0.5" "hermes-agent"
 
 RUN useradd -m -u 2000 -s /bin/bash agent
 USER agent
@@ -161,6 +168,7 @@ class DockerCLIAdapter(Adapter):
         mattermost_token: str = "",
         team: str = "",
         owner_username: str = "",
+        harness=None,
     ):
         self.agent_id = agent_id
         self.model = model
@@ -190,15 +198,93 @@ class DockerCLIAdapter(Adapter):
         self.mattermost_token = mattermost_token
         self.team = team
         self.owner_username = owner_username
+        # Which agent engine runs inside the container. Default is
+        # Claude Code — the stream-json + --resume path. Hermes
+        # swaps in a one-shot ``hermes chat -q`` per turn. See
+        # puffoagent.agent.harness.
+        if harness is None:
+            from ..harness import ClaudeCodeHarness
+            harness = ClaudeCodeHarness()
+        self.harness = harness
         self._started_lock = asyncio.Lock()
         self._started = False
         self._session: ClaudeSession | None = None
+        # Long-lived ``hermes`` subprocess when harness=hermes.
+        # One process per adapter instance; replies drift through
+        # stdout while we pipe each turn's user message to stdin.
+        self._hermes_proc = None
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         await self._ensure_started()
-        session = self._ensure_session()
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
+        if self.harness.name() == "hermes":
+            return await self._run_turn_hermes(user_message, ctx.system_prompt)
+        session = self._ensure_session()
         return await session.run_turn(user_message, ctx.system_prompt)
+
+    async def _run_turn_hermes(self, user_message: str, system_prompt: str) -> TurnResult:
+        """Hermes turn via a long-lived interactive ``hermes`` subprocess.
+
+        Mirrors the Claude Code pattern: spawn once, keep it alive,
+        pipe each turn's user message on stdin, read the reply from
+        stdout. Hermes manages its own session continuity (per-HOME
+        ``~/.hermes/sessions/``) — we just talk to the running
+        process.
+
+        On first ever worker start we spawn bare ``hermes``; on
+        daemon restart we spawn ``hermes -c`` to resume the most
+        recent session (which, thanks to per-agent HOME isolation,
+        is unambiguously this agent's own last session).
+        """
+        proc = await self._ensure_hermes_proc(system_prompt)
+        return await _hermes_turn(proc, user_message, self.agent_id)
+
+    async def _ensure_hermes_proc(self, system_prompt: str):
+        """Spawn (or reuse) the long-lived interactive ``hermes`` in
+        the container. The container already has HOME pointing at the
+        per-agent ``.claude``/``.hermes`` dirs via bind mounts, so
+        hermes picks up Claude Code's credentials automatically.
+
+        The ``system_prompt`` is dropped into ``.hermes/SOUL.md`` (the
+        hermes equivalent of CLAUDE.md) before first spawn so the
+        agent identity carries through every turn without inlining
+        it into each user message.
+        """
+        if self._hermes_proc is not None and self._hermes_proc.returncode is None:
+            return self._hermes_proc
+        _seed_hermes_soul(self.agent_home_dir, system_prompt)
+        _seed_hermes_config(self.agent_home_dir, self.model)
+        has_prior_session = self.session_file.exists()
+        cmd = ["docker", "exec", "-i", self.container_name, "hermes"]
+        if has_prior_session:
+            cmd.append("-c")  # --continue, resume most recent session
+        logger.info(
+            "agent %s: spawning hermes %s",
+            self.agent_id, "(resume)" if has_prior_session else "(new)",
+        )
+        self._hermes_proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if not has_prior_session:
+            try:
+                self.session_file.parent.mkdir(parents=True, exist_ok=True)
+                self.session_file.write_text(
+                    json.dumps({
+                        "harness": "hermes",
+                        "spawned_at": int(time.time()),
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "agent %s: couldn't mark hermes session_file: %s "
+                    "(next daemon restart will spawn a fresh session)",
+                    self.agent_id, exc,
+                )
+        return self._hermes_proc
 
     async def warm(self, system_prompt: str) -> None:
         """Start the container + claude subprocess eagerly at daemon
@@ -209,6 +295,10 @@ class DockerCLIAdapter(Adapter):
         audit file is useful even for idle agents.
         """
         await self._ensure_started()
+        if self.harness.name() == "hermes":
+            # Hermes is one-shot per turn — no persistent subprocess
+            # to warm. Container-start above is enough.
+            return
         session = self._ensure_session()
         if not session.has_persisted_session():
             logger.info(
@@ -223,6 +313,9 @@ class DockerCLIAdapter(Adapter):
         ``run_turn`` spawns a fresh one that re-reads CLAUDE.md.
         The container stays up — we don't pay container cold-start
         on every reload.
+
+        No-op for hermes: each turn is already a fresh process, so
+        there's nothing cached to drop.
         """
         if self._session is not None:
             await self._session.aclose()
@@ -314,6 +407,8 @@ class DockerCLIAdapter(Adapter):
         if self._session is not None:
             await self._session.aclose()
             self._session = None
+        await _kill_hermes_proc(self._hermes_proc, self.agent_id)
+        self._hermes_proc = None
         if not self._started:
             return
         await _run_cmd(["docker", "rm", "-f", self.container_name], check=False)
@@ -374,6 +469,7 @@ class DockerCLIAdapter(Adapter):
             team=self.team,
             owner_username=self.owner_username,
             runtime_kind="cli-docker",
+            harness=self.harness.name(),
         )
         # Write to workspace/.puffoagent/mcp-config.json on the host;
         # the container sees the same file at
@@ -580,6 +676,127 @@ class DockerCLIAdapter(Adapter):
                 f"docker run failed for {self.container_name}: "
                 f"{stderr.decode('utf-8', errors='replace').strip()[:500]}"
             )
+
+
+# How long to wait after the last stdout byte before deciding
+# hermes is done emitting a reply. Conservative — hermes can stream
+# tokens with visible latency, and a too-short idle window would
+# cut replies off mid-word. 4 s strikes a balance between
+# responsiveness and over-aggressive truncation. Revisit if we
+# see end-of-turn races in practice.
+_HERMES_IDLE_TIMEOUT_SECONDS = 4.0
+
+# Absolute ceiling on how long we'll wait for a hermes reply before
+# giving up. Even a multi-tool-call turn shouldn't exceed this.
+_HERMES_TURN_TIMEOUT_SECONDS = 300.0
+
+
+def _seed_hermes_soul(agent_home: Path, system_prompt: str) -> None:
+    """Mirror our managed CLAUDE.md-equivalent into ``.hermes/SOUL.md``
+    so hermes' interactive session starts with the agent's identity.
+    Overwrite every spawn — the system prompt is deterministic and
+    regenerating at worker start is how puffoagent stays the
+    source of truth for profile + memory layering."""
+    if not system_prompt:
+        return
+    soul = agent_home / ".hermes" / "SOUL.md"
+    try:
+        soul.parent.mkdir(parents=True, exist_ok=True)
+        soul.write_text(system_prompt, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("couldn't seed hermes SOUL.md at %s: %s", soul, exc)
+
+
+def _seed_hermes_config(agent_home: Path, model: str) -> None:
+    """Write a minimal ``.hermes/config.yaml`` selecting Anthropic as
+    the provider so hermes picks up Claude Code's credential store
+    (``$HOME/.claude/.credentials.json``, auto-discovered). Lets us
+    skip the interactive ``hermes model`` wizard inside the
+    container."""
+    cfg = agent_home / ".hermes" / "config.yaml"
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        body = ["model:", "  provider: anthropic"]
+        if model:
+            body.append(f"  default: {model}")
+        cfg.write_text("\n".join(body) + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("couldn't seed hermes config.yaml at %s: %s", cfg, exc)
+
+
+async def _kill_hermes_proc(proc, agent_id: str) -> None:
+    """Terminate a long-lived hermes subprocess on adapter shutdown.
+    No-op if there's no proc or it already exited. Gives hermes 3s
+    to flush any in-flight output before SIGKILL.
+    """
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    except (ProcessLookupError, OSError) as exc:
+        logger.debug("agent %s: hermes teardown: %s", agent_id, exc)
+
+
+async def _hermes_turn(proc, user_message: str, agent_id: str):
+    """Send ``user_message`` to an open hermes subprocess on stdin,
+    then read stdout until it goes idle for _HERMES_IDLE_TIMEOUT
+    seconds. Returns a ``TurnResult``.
+
+    Hermes' interactive stdout is free-form text — no structured
+    delimiter like claude's stream-json ``result`` event. An idle
+    window is the least-bad signal that the agent is done talking.
+    If this proves racy in practice we'll upgrade to a prompt-
+    marker read (``> `` or similar) once we've seen the actual
+    output shape.
+    """
+    started = time.time()
+    if proc.stdin is None or proc.stdout is None:
+        return TurnResult(reply="", metadata={
+            "error": "hermes subprocess has no stdin/stdout",
+        })
+    try:
+        proc.stdin.write(user_message.encode("utf-8") + b"\n")
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        logger.error("agent %s: hermes stdin write failed: %s", agent_id, exc)
+        return TurnResult(reply="", metadata={
+            "error": f"hermes stdin closed: {exc}",
+        })
+
+    deadline = started + _HERMES_TURN_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            logger.warning(
+                "agent %s: hermes turn hit %.0fs ceiling; returning partial reply",
+                agent_id, _HERMES_TURN_TIMEOUT_SECONDS,
+            )
+            break
+        try:
+            chunk = await asyncio.wait_for(
+                proc.stdout.read(4096),
+                timeout=min(_HERMES_IDLE_TIMEOUT_SECONDS, remaining),
+            )
+        except asyncio.TimeoutError:
+            # Idle window reached — assume hermes is done.
+            break
+        if not chunk:
+            break  # EOF — process exited mid-turn
+        chunks.append(chunk)
+
+    elapsed = time.time() - started
+    reply = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    logger.info(
+        "agent %s: hermes turn done in %.1fs, %d reply chars",
+        agent_id, elapsed, len(reply),
+    )
+    return TurnResult(reply=reply, metadata={"harness": "hermes"})
 
 
 async def _run_cmd(cmd: list[str], check: bool = True) -> tuple[int, bytes, bytes]:

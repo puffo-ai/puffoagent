@@ -155,6 +155,7 @@ class LocalCLIAdapter(Adapter):
         team: str = "",
         owner_username: str = "",
         permission_mode: str = "default",
+        harness=None,
     ):
         self.agent_id = agent_id
         self.model = model
@@ -172,22 +173,110 @@ class LocalCLIAdapter(Adapter):
         self.team = team
         self.owner_username = owner_username
         self.permission_mode = _sanitise_permission_mode(permission_mode, agent_id)
+        if harness is None:
+            from ..harness import ClaudeCodeHarness
+            harness = ClaudeCodeHarness()
+        self.harness = harness
         self._verified = False
         self._session: ClaudeSession | None = None
+        # Long-lived ``hermes`` subprocess when harness=hermes. See
+        # docker_cli for the shared helpers (seed_soul, seed_config,
+        # hermes_turn, idle-timeout read strategy).
+        self._hermes_proc = None
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         self._verify()
-        session = self._ensure_session()
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
+        if self.harness.name() == "hermes":
+            return await self._run_turn_hermes(user_message, ctx.system_prompt)
+        session = self._ensure_session()
         return await session.run_turn(user_message, ctx.system_prompt)
+
+    async def _run_turn_hermes(self, user_message: str, system_prompt: str) -> TurnResult:
+        """Hermes turn on the host via a long-lived ``hermes`` subprocess.
+
+        Twin of DockerCLIAdapter's hermes path; the only difference
+        is we don't prefix ``docker exec`` because the agent runs on
+        the host. $HOME points at the agent's virtual home so hermes
+        auto-discovers our linked ``.claude/.credentials.json``.
+        """
+        from .docker_cli import (
+            _hermes_turn,
+            _seed_hermes_config,
+            _seed_hermes_soul,
+        )
+        proc = await self._ensure_hermes_proc(
+            system_prompt, _seed_hermes_config, _seed_hermes_soul,
+        )
+        if proc is None:
+            return TurnResult(reply="", metadata={"error": "hermes binary missing"})
+        return await _hermes_turn(proc, user_message, self.agent_id)
+
+    async def _ensure_hermes_proc(
+        self, system_prompt: str, seed_config, seed_soul,
+    ):
+        if self._hermes_proc is not None and self._hermes_proc.returncode is None:
+            return self._hermes_proc
+        seed_soul(self.agent_home_dir, system_prompt)
+        seed_config(self.agent_home_dir, self.model)
+        has_prior_session = self.session_file.exists()
+        cmd = ["hermes"]
+        if has_prior_session:
+            cmd.append("-c")
+        env = {
+            **os.environ,
+            "HOME": str(self.agent_home_dir),
+            "USERPROFILE": str(self.agent_home_dir),
+        }
+        logger.info(
+            "agent %s: spawning hermes %s",
+            self.agent_id, "(resume)" if has_prior_session else "(new)",
+        )
+        try:
+            self._hermes_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=self.workspace_dir,
+            )
+        except FileNotFoundError:
+            logger.error(
+                "agent %s: `hermes` binary not on PATH. install with "
+                "`pip install hermes-agent` or use harness=claude-code.",
+                self.agent_id,
+            )
+            return None
+        if not has_prior_session:
+            try:
+                self.session_file.parent.mkdir(parents=True, exist_ok=True)
+                self.session_file.write_text(
+                    json.dumps({
+                        "harness": "hermes",
+                        "spawned_at": int(time.time()),
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "agent %s: couldn't mark hermes session_file: %s",
+                    self.agent_id, exc,
+                )
+        return self._hermes_proc
 
     async def warm(self, system_prompt: str) -> None:
         """Spawn the claude subprocess eagerly so the first DM
         doesn't wait for cold start. Only actually spawns if this
         agent has a persisted session — a fresh agent waits for its
         first message to avoid paying for permanently-idle bots.
+
+        No-op for hermes: each turn is a fresh ``hermes chat -q``,
+        nothing to pre-spawn.
         """
         self._verify()
+        if self.harness.name() == "hermes":
+            return
         session = self._ensure_session()
         if not session.has_persisted_session():
             logger.info(
@@ -200,6 +289,9 @@ class LocalCLIAdapter(Adapter):
     async def reload(self, new_system_prompt: str) -> None:
         """Close the long-lived claude subprocess so the next
         ``run_turn`` spawns a fresh one that re-reads CLAUDE.md.
+
+        No-op for hermes: each turn is already a fresh process, so
+        there's nothing cached to drop.
         """
         if self._session is not None:
             await self._session.aclose()
@@ -318,6 +410,9 @@ class LocalCLIAdapter(Adapter):
         if self._session is not None:
             await self._session.aclose()
             self._session = None
+        from .docker_cli import _kill_hermes_proc
+        await _kill_hermes_proc(self._hermes_proc, self.agent_id)
+        self._hermes_proc = None
 
     def _ensure_session(self) -> ClaudeSession:
         if self._session is not None:
@@ -496,6 +591,7 @@ class LocalCLIAdapter(Adapter):
             team=self.team,
             owner_username=self.owner_username,
             runtime_kind="cli-local",
+            harness=self.harness.name(),
         )
         write_cli_mcp_config(
             self.mcp_config_file,

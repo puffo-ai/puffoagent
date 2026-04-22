@@ -96,6 +96,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
     # want a specific claude model per agent.
     if kind == "cli-docker":
         from ..agent.adapters.docker_cli import DockerCLIAdapter
+        from ..agent.harness import build_harness
         return DockerCLIAdapter(
             agent_id=agent_cfg.id,
             model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
@@ -109,6 +110,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             mattermost_url=agent_cfg.mattermost.url,
             mattermost_token=agent_cfg.mattermost.bot_token,
             team=agent_cfg.mattermost.team_name,
+            harness=build_harness(agent_cfg.runtime.harness),
         )
 
     if kind == "cli-local":
@@ -128,6 +130,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
                 "approval will auto-deny.",
                 agent_cfg.id,
             )
+        from ..agent.harness import build_harness
         return LocalCLIAdapter(
             agent_id=agent_cfg.id,
             model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
@@ -141,6 +144,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             team=agent_cfg.mattermost.team_name,
             owner_username=operator,
             permission_mode=agent_cfg.runtime.permission_mode,
+            harness=build_harness(agent_cfg.runtime.harness),
         )
 
     raise RuntimeError(

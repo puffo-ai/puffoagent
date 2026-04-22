@@ -579,6 +579,21 @@ class RuntimeConfig:
     # approves reads and routes everything else through our
     # permission-prompt-tool proxy — most agents should use this.
     permission_mode: str = "default"
+    # Which agent engine runs inside the runtime. Default ``claude-code``
+    # spawns the ``claude`` CLI with our stream-json session protocol,
+    # --resume for session continuity, --model for model override, and
+    # our MCP tool suite (install_skill, refresh, etc.). ``hermes``
+    # spawns `hermes chat -q` one-shot per turn against the Anthropic
+    # API using Claude Code's credential store (auto-discovered from
+    # $HOME/.claude/.credentials.json). Only meaningful for kind
+    # ``cli-local`` / ``cli-docker``; ``sdk`` and ``chat-only`` ignore
+    # it.
+    #
+    # Heads-up on hermes + anthropic billing: per NousResearch issue
+    # #12905, third-party OAuth clients route to Anthropic's
+    # ``extra_usage`` pool, NOT your Claude subscription. Same token,
+    # different ledger. Confirm cost expectations before production use.
+    harness: str = "claude-code"  # claude-code | hermes
 
 
 @dataclass
@@ -629,6 +644,7 @@ class AgentConfig:
                 allowed_tools=list(rt.get("allowed_tools") or []),
                 docker_image=rt.get("docker_image", ""),
                 permission_mode=rt.get("permission_mode", "default"),
+                harness=rt.get("harness", "claude-code"),
             ),
             profile=raw.get("profile", "profile.md"),
             memory_dir=raw.get("memory_dir", "memory"),
