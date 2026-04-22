@@ -26,10 +26,6 @@ isolation.
 
 A loud one-time WARNING is logged on first turn so operators see it
 in the daemon log even if they skipped the README.
-
-Permission-proxy mode (forwarding tool approvals to the Mattermost
-owner via an MCP bridge) is tracked separately as a follow-up; see
-task #38.
 """
 
 from __future__ import annotations

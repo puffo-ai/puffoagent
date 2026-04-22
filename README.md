@@ -441,6 +441,10 @@ Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are
 - If your machine is lost or compromised, **revoke the PAT immediately** via Profile → Security in the webapp, and rotate your LLM API key from the provider's dashboard.
 - The daemon makes outbound HTTPS connections to your Puffo.ai server and to your LLM provider. It doesn't open any inbound ports.
 
+## Changelog
+
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

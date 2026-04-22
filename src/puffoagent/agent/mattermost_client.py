@@ -441,14 +441,10 @@ class MattermostClient:
         the server so the agent sees who's human vs. bot. Duplicates
         are deduped; unknown names (not valid users) are dropped.
 
-        Includes the bot's own username when it's mentioned (marked
-        with ``is_self: true``). Pre-fix we used to skip self — the
-        agent could see its own @-mention in the raw text but not in
-        the structured list, which was a consistency bug that made
-        multi-agent coordination messy. The text layer now surfaces
-        self as ``@you(<name>)`` (see ``_handle_event``); the
-        mentions list carries the same info in structured form so
-        either layer works for the agent.
+        The bot's own username is included and flagged with
+        ``is_self: true``. Paired with the ``@you(<name>)`` rewrite
+        in ``_handle_event``, agents get two independent signals
+        that they were addressed — one structured, one textual.
 
         Returns a list of ``{"username": str, "is_bot": bool,
         "is_self": bool}`` in order of first appearance.
@@ -684,16 +680,11 @@ class MattermostClient:
         # whether a reply is needed.
         mentions = await self._resolve_mentions(session, text)
 
-        # Rewrite self-mentions to ``@you(<bot_username>)`` rather than
-        # stripping them outright. Previous behavior (strip-self)
-        # confused LLMs in multi-agent threads — they saw something
-        # like "@agent2 please do X" and pattern-matched agent2 as
-        # the target, missing that they themselves were also tagged.
-        # The ``@you(name)`` marker makes it unambiguous: ``@you`` is
-        # the "I'm being addressed" signal, ``(name)`` preserves the
-        # agent's own handle so self-references in the reply stay
-        # coherent. Other @-mentions are left intact so the agent
-        # still sees who else was tagged.
+        # Rewrite self-mentions to ``@you(<bot_username>)`` so the
+        # agent gets an unambiguous "I'm being addressed" signal in
+        # the message text. The wrapped ``(name)`` preserves the
+        # agent's own handle for self-references; other @-mentions
+        # are left intact so peer handles stay visible.
         clean_text = text.replace(
             f"@{self.bot_username}", f"@you({self.bot_username})",
         ).strip()

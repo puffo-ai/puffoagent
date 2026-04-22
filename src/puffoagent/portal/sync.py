@@ -221,8 +221,10 @@ def _apply_remote(agent_id: str, remote: dict) -> None:
         id=agent_id,
         # pause/resume on the host would race the next sync tick
         # and flip back to whatever the server last reported if we
-        # didn't preserve existing.state. Server-side pause/resume
-        # propagation is a follow-up (see task #1 follow-up).
+        # didn't preserve existing.state. Server-authoritative
+        # pause/resume propagation isn't implemented yet — the
+        # server's state field is only consulted for brand-new
+        # agents.
         state=existing.state if existing else remote.get("state", "running"),
         display_name=remote.get("display_name", agent_id),
         mattermost=mattermost,

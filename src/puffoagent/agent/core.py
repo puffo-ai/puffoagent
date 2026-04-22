@@ -100,12 +100,10 @@ class PuffoAgent:
         )
         result = await self.adapter.run_turn(ctx)
 
-        # Substring match (not equality): agents sometimes hedge with
-        # prose around the marker, e.g. "[SILENT] I wasn't mentioned
-        # in this thread" — we treat any reply containing the
-        # ``[SILENT]`` token as silent. The primer still tells agents
-        # to emit EXACTLY ``[SILENT]``; this just stops punishing
-        # them for being verbose about the decision.
+        # Substring match (not equality): the primer asks for exactly
+        # ``[SILENT]`` but agents sometimes hedge with surrounding
+        # prose (e.g. "[SILENT] I wasn't mentioned"). Any reply
+        # containing the token is treated as silent.
         if not result.reply or "[SILENT]" in result.reply:
             self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
             return None

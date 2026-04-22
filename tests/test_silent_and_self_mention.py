@@ -16,9 +16,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-
-import pytest
 
 from puffoagent.agent.adapters import Adapter, TurnContext, TurnResult
 from puffoagent.agent.core import PuffoAgent
