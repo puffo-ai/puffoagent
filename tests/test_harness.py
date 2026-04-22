@@ -276,15 +276,66 @@ def test_parse_hermes_reply_multiline_body():
     assert session_id == "abc"
 
 
-def test_parse_hermes_reply_no_session_id_returns_empty():
-    """If hermes output is malformed (e.g. error banner without the
-    session_id marker), parser returns empties so the caller can log
-    the raw stdout rather than silently returning garbage."""
+def test_parse_hermes_reply_no_session_id_but_reply_present():
+    """Some hermes invocations emit the reply without a
+    ``session_id:`` line at all (observed on fresh sessions with
+    ``--quiet``). The parser must still extract the reply.
+    """
     from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
-    stdout = "some error text\nno session id here"
+    stdout = (
+        "⚠️  Normalized model 'anthropic/claude-opus-4-6' to 'claude-opus-4-6' for \n"
+        "anthropic.\n"
+        "[SILENT]"
+    )
     reply, session_id = _parse_hermes_reply(stdout)
-    assert reply == ""
-    assert session_id == ""
+    assert reply == "[SILENT]"
+    assert session_id == ""  # absent; parser tolerates
+
+
+def test_parse_hermes_reply_resumed_session_id_captured_without_session_id_line():
+    """The ``↻ Resumed session <id>`` line is alone enough to
+    capture session_id when no standalone ``session_id:`` line
+    follows."""
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = (
+        "⚠️  Normalized model 'anthropic/claude-opus-4-6' to 'claude-opus-4-6' for \n"
+        "anthropic.\n"
+        "↻ Resumed session 20260422_222809_425056 (1 user message, 2 total messages)\n"
+        "你好 @han.dev！有什么我可以帮你的吗？😊"
+    )
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert reply == "你好 @han.dev！有什么我可以帮你的吗？😊"
+    assert session_id == "20260422_222809_425056"
+
+
+def test_parse_hermes_reply_filters_banner_lines_narrowly():
+    """Banner-tail filter (``^[a-z0-9-]+\\.$``) only matches a line
+    that is literally one word + a period, like ``anthropic.``.
+    Regular reply sentences — even ones ending in a period and
+    even one that says ``hermes.`` at the end — are NOT eaten.
+    """
+    from puffoagent.agent.adapters.docker_cli import _parse_hermes_reply
+    stdout = (
+        "⚠️  Normalized model 'x/y' to 'y' for \n"
+        "anthropic.\n"
+        "session_id: sid-123\n"
+        "The answer is 42.\n"
+        "Further context: hermes.\n"
+        "- bullet point\n"
+        "- another"
+    )
+    reply, session_id = _parse_hermes_reply(stdout)
+    assert session_id == "sid-123"
+    # Full content preserved; the banner `anthropic.` tail-line
+    # DOES match the filter and is dropped. Regular prose like
+    # "Further context: hermes." has spaces and punctuation so
+    # it doesn't match — stays in the reply.
+    assert "The answer is 42." in reply
+    assert "Further context: hermes." in reply
+    assert "- bullet point" in reply
+    assert "- another" in reply
+    # The banner tail line DID get filtered.
+    assert "anthropic." not in reply
 
 
 def test_stitch_hermes_prompt_first_turn():

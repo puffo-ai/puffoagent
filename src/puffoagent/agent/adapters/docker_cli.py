@@ -825,11 +825,35 @@ async def _image_exists_locally(tag: str) -> bool:
 # we detect the case and fall back to a fresh ``hermes chat``.
 _HERMES_NO_RESUME_SIGNATURE = "No previous CLI session found to continue"
 
-# ``session_id: <id>`` appears in hermes's --quiet stdout right
-# before the reply body. We use it as both the reply boundary
-# (everything after is the reply) and as a value to persist
-# alongside our sentinel for post-hoc debugging.
+# Banner / metadata lines hermes --quiet emits before the reply
+# body. We skip any line matching these to get at the actual
+# response text.
+#
+# Examples observed in the wild:
+#
+#   ⚠️  Normalized model 'anthropic/claude-opus-4-6' to 'claude-opus-4-6' for
+#   anthropic.
+#   ↻ Resumed session 20260422_222809_425056 (1 user message, 2 total messages)
+#   session_id: 20260422_213753_5d42f9
+#
+# The session id occurs in either the ``Resumed session`` line
+# (when ``--continue`` succeeds) or the standalone ``session_id:``
+# line (on older hermes builds / sometimes on the first turn). It
+# can also be absent entirely on a fresh session — we tolerate that
+# and return the reply with session_id="".
 _HERMES_SESSION_ID_RE = re.compile(r"^session_id:\s*(\S+)\s*$")
+_HERMES_RESUMED_SESSION_RE = re.compile(
+    r"^↻\s*Resumed session\s+(\S+).*$"
+)
+_HERMES_MODEL_NORMALISED_RE = re.compile(
+    r"^⚠️\s+Normalized model .*$"
+)
+# Continuation line of the "Normalized model" banner — the value
+# gets wrapped and the tail lands on its own line. Match exactly
+# ``anthropic.`` (or any bare provider name followed by a period)
+# so we don't accidentally eat reply text that happens to start
+# with a period.
+_HERMES_MODEL_NORMALISED_TAIL_RE = re.compile(r"^[a-z0-9\-]+\.$")
 
 
 # Where Claude Code stores its OAuth credentials on the host. We
@@ -891,27 +915,49 @@ def _parse_hermes_reply(stdout_text: str) -> tuple[str, str]:
     """Pull the reply + session id out of ``hermes chat --quiet``
     stdout.
 
-    Shape (with --quiet suppressing banner/spinner):
+    Observed shapes in the wild:
 
-        ⚠️  Normalized model 'anthropic/...' to '...' for anthropic.
-        [↻ Resumed session <id> (...)]  <-- only on --continue
+        # older build / some first-turns:
+        ⚠️  Normalized model '...' to '...' for
+        anthropic.
 
-        session_id: <id>
-        <reply body — may span multiple lines>
+        session_id: 20260422_213753_5d42f9
+        <reply>
 
-    The ``session_id:`` line is the reliable reply boundary;
-    everything after it is the reply. Returns empty strings if
-    parsing fails so the caller can log the raw stdout for
-    debugging instead of invisibly returning garbage.
+        # --continue case:
+        ⚠️  Normalized model '...' to '...' for
+        anthropic.
+        ↻ Resumed session 20260422_222809_425056 (1 user message, 2 total messages)
+        <reply>
+
+        # some fresh sessions (no session_id printed at all):
+        ⚠️  Normalized model '...' to '...' for
+        anthropic.
+        <reply>
+
+    Strategy: filter out known banner / metadata lines, capture
+    session_id from whichever marker produced it (or leave empty),
+    concatenate the rest as the reply. Robust to hermes changing
+    which metadata it emits across versions / turn types.
     """
-    lines = stdout_text.splitlines()
-    for i, line in enumerate(lines):
+    session_id = ""
+    content: list[str] = []
+    for line in stdout_text.splitlines():
         m = _HERMES_SESSION_ID_RE.match(line)
         if m:
             session_id = m.group(1)
-            reply = "\n".join(lines[i + 1:]).strip()
-            return reply, session_id
-    return "", ""
+            continue
+        m = _HERMES_RESUMED_SESSION_RE.match(line)
+        if m:
+            session_id = session_id or m.group(1)
+            continue
+        if _HERMES_MODEL_NORMALISED_RE.match(line):
+            continue
+        if _HERMES_MODEL_NORMALISED_TAIL_RE.match(line):
+            continue
+        content.append(line)
+    reply = "\n".join(content).strip()
+    return reply, session_id
 
 
 async def _run_cmd(cmd: list[str], check: bool = True) -> tuple[int, bytes, bytes]:
