@@ -122,11 +122,11 @@ class SDKAdapter(Adapter):
         tool_calls = 0
         input_tokens = 0
         output_tokens = 0
-        # See cli_session.py for the double-post story. Short version:
-        # if ``mcp__puffo__send_message`` was called this turn, the
-        # shell needs to suppress the normal auto-reply to avoid
-        # posting the narration text as a duplicate message.
+        # See cli_session.py — same contract, same double-post story.
+        # tool_names is debug; send_message_targets is what the shell
+        # actually uses to decide suppression.
         tool_names_used: list[str] = []
+        send_message_targets: list[dict] = []
 
         # The SDK requires streaming-mode input (AsyncIterable of message
         # dicts) whenever can_use_tool is set — a plain string prompt
@@ -142,6 +142,12 @@ class SDKAdapter(Adapter):
                     elif isinstance(block, self._ToolUseBlock):
                         tool_calls += 1
                         tool_names_used.append(block.name)
+                        if block.name == "mcp__puffo__send_message":
+                            tool_input = block.input or {}
+                            send_message_targets.append({
+                                "channel": str(tool_input.get("channel", "")),
+                                "root_id": str(tool_input.get("root_id", "")),
+                            })
                         if ctx.on_progress is not None:
                             try:
                                 await ctx.on_progress(f"🔨 {block.name}")
@@ -157,7 +163,10 @@ class SDKAdapter(Adapter):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tool_calls=tool_calls,
-            metadata={"tool_names": tool_names_used},
+            metadata={
+                "tool_names": tool_names_used,
+                "send_message_targets": send_message_targets,
+            },
         )
 
     async def _gate(self, tool_name: str, tool_input: dict, context: Any) -> dict:

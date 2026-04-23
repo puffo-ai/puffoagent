@@ -93,25 +93,71 @@ class PuffoAgent:
             self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
             return None
 
-        # If the agent used ``send_message`` this turn, MCP already
-        # posted on its behalf. Any surrounding narration text
-        # ("Let me read the file...", "Replied in thread.") collected
-        # into result.reply would land as a duplicate message.
-        # Append to the conversation log so future turns have context,
-        # but suppress the auto-reply. Known limitation: if the agent
-        # fanned out to a DIFFERENT channel via send_message and its
-        # narration was meant for THIS channel, that narration is
-        # also suppressed — fan-out is rare and the primer steers
-        # agents to not mix the two patterns.
-        if "mcp__puffo__send_message" in result.metadata.get("tool_names", []):
+        # Double-post guard. The worker posts the shell's auto-reply
+        # to ``(channel_id, root_id)`` — the same slot as the incoming
+        # message. If the agent ALSO called ``send_message`` this turn
+        # targeting that same slot, MCP already posted there on the
+        # agent's behalf; the narration text in result.reply would
+        # land as a duplicate. We still append to ``agent.log`` so the
+        # next turn sees the narration as context — just skip the
+        # outbound post.
+        if self._send_message_covered_current_slot(
+            targets=result.metadata.get("send_message_targets", []),
+            channel_id=channel_id,
+            channel_name=channel_name,
+            root_id=root_id,
+        ):
             self.logger.debug(
-                f"[suppress] [{channel_name}] @{sender}: send_message used, not double-posting"
+                f"[suppress] [{channel_name}] @{sender}: send_message "
+                f"already posted to (channel={channel_id or channel_name}, "
+                f"root_id={root_id!r}); skipping auto-reply"
             )
             self._append_assistant(channel_name, result.reply)
             return None
 
         self._append_assistant(channel_name, result.reply)
         return result.reply
+
+    @staticmethod
+    def _send_message_covered_current_slot(
+        targets: list[dict],
+        channel_id: str,
+        channel_name: str,
+        root_id: str,
+    ) -> bool:
+        """True iff at least one ``send_message`` call in this turn
+        posted to the same ``(channel, thread)`` the shell's auto-
+        reply would use.
+
+        Matching rules:
+
+          * **Channel match.** ``send_message`` accepts either a
+            channel ID or a channel name, so the tool's ``channel``
+            arg must equal the incoming message's ``channel_id`` OR
+            ``channel_name``. DMs addressed via ``@handle`` form
+            won't match the internal ``user1__user2`` channel name
+            — a known limitation, acceptable for now since agents
+            typically DM via channel_id.
+
+          * **Thread match.** Both strings must be equal. Empty
+            string means "top-level post in the channel"; a non-empty
+            value is a specific thread root. Equal non-empty strings
+            mean the same thread; equal empty strings mean both post
+            top-level in the same channel (still a user-visible
+            duplicate). Different values (one top-level, one threaded,
+            or two different threads) are distinct conversations and
+            do NOT trigger suppression.
+        """
+        for target in targets:
+            t_channel = target.get("channel", "")
+            if not t_channel:
+                continue
+            if t_channel != channel_id and t_channel != channel_name:
+                continue
+            if target.get("root_id", "") != root_id:
+                continue
+            return True
+        return False
 
     def _append_user(
         self,

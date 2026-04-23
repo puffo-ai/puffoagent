@@ -1,24 +1,28 @@
-"""Regression guard: when the agent calls ``mcp__puffo__send_message``,
-the MCP server has already posted to the channel. Any narration text
-captured in the same turn must NOT be auto-posted by the shell — that
-was the ``double-post`` bug.
+"""Regression + precision tests for the ``send_message`` double-post guard.
 
-The contract we verify here (in `PuffoAgent.handle_message`):
+The worker posts the shell's auto-reply to ``(channel_id, root_id)`` —
+the same conversation slot as the incoming message (see
+``portal/worker.py`` where ``client.post_message(channel_id, reply,
+root_id=root_id)`` is called after ``handle_message`` returns).
 
-  * metadata["tool_names"] contains "mcp__puffo__send_message"  ->
-      handle_message returns None (no auto-reply), but the reply
-      text IS appended to ``agent.log`` so future turns still see
-      it as context.
+``PuffoAgent.handle_message`` suppresses its auto-reply IFF at least
+one ``send_message`` call this turn landed in that exact slot:
 
-  * metadata["tool_names"] without send_message -> behaves as
-      before: non-[SILENT] replies get posted.
+  * channel match: the tool's ``channel`` arg equals either the
+    incoming message's ``channel_id`` OR its ``channel_name`` (the
+    MCP tool accepts either).
 
-  * metadata missing entirely or empty (legacy adapters, ChatOnly)
-      -> behaves as before (no suppression).
+  * thread match: the tool's ``root_id`` equals the incoming
+    ``root_id`` (string equality; empty means "top-level in
+    channel", which still counts).
 
-The adapter side of the contract — that cli_session and sdk actually
-populate ``tool_names`` — is exercised in their respective adapter
-tests; this file is strictly about the shell's decision logic.
+Any suppressed reply is still appended to ``agent.log`` so the next
+turn sees it as context — only the outbound post is skipped.
+
+What these tests do NOT cover: the adapter-side plumbing that
+populates ``send_message_targets`` from CLI/SDK tool_use events.
+That's exercised in the adapter suites (cli_session_recovery
+etc. via ``TurnResult.metadata``).
 """
 
 from __future__ import annotations
@@ -37,140 +41,257 @@ def _run(coro):
 
 
 class _StubAdapter(Adapter):
-    """Adapter that returns a canned ``TurnResult`` including
-    metadata. Lets us drive ``handle_message`` through the
-    suppress-after-send_message branch deterministically."""
+    """Returns a canned ``TurnResult`` with the metadata we want
+    the shell to see. Lets every test drive ``handle_message``
+    through a specific metadata shape deterministically."""
 
-    def __init__(self, reply: str, tool_names: list[str] | None = None):
+    def __init__(
+        self,
+        reply: str,
+        *,
+        tool_names: list[str] | None = None,
+        send_message_targets: list[dict] | None = None,
+    ):
         self._reply = reply
         self._tool_names = tool_names
+        self._targets = send_message_targets
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         meta: dict = {}
         if self._tool_names is not None:
             meta["tool_names"] = list(self._tool_names)
+        if self._targets is not None:
+            meta["send_message_targets"] = [dict(t) for t in self._targets]
         return TurnResult(reply=self._reply, metadata=meta)
 
 
-def _agent(reply: str, tmp_path, tool_names: list[str] | None = None) -> PuffoAgent:
+def _agent(reply: str, tmp_path, **meta) -> PuffoAgent:
     return PuffoAgent(
-        adapter=_StubAdapter(reply, tool_names),
+        adapter=_StubAdapter(reply, **meta),
         system_prompt="you are a test bot",
         memory_dir=str(tmp_path),
     )
 
 
-async def _dispatch(agent: PuffoAgent, text: str = "hi") -> str | None:
+async def _dispatch(
+    agent: PuffoAgent,
+    *,
+    channel_id: str = "c-main",
+    channel_name: str = "general",
+    root_id: str = "",
+    post_id: str = "p-1",
+    text: str = "hi",
+) -> str | None:
     return await agent.handle_message(
-        channel_id="c1",
-        channel_name="test",
+        channel_id=channel_id,
+        channel_name=channel_name,
         sender="u",
         sender_email="u@x",
         text=text,
+        post_id=post_id,
+        root_id=root_id,
     )
 
 
 def _assistant_entries(agent: PuffoAgent) -> list[dict]:
-    return [entry for entry in agent.log if entry.get("role") == "assistant"]
+    return [e for e in agent.log if e.get("role") == "assistant"]
 
 
-# ── suppression when send_message was called ─────────────────────────────────
+# ── suppress: send_message landed in the current slot ───────────────────────
 
 
-def test_send_message_suppresses_autoreply(tmp_path):
-    """The canonical double-post scenario: agent narrates
-    ("Replied in thread.") while also invoking send_message.
-    handle_message must return None."""
+def test_suppresses_when_send_message_matches_channel_id_top_level(tmp_path):
+    """Incoming is a top-level post; agent send_message's to the
+    same channel_id with empty root_id. Both land as top-level
+    posts in the same channel — the user would see two messages."""
     agent = _agent(
         "Replied in thread.",
         tmp_path,
-        tool_names=["mcp__puffo__send_message"],
+        send_message_targets=[{"channel": "c-main", "root_id": ""}],
     )
-    assert _run(_dispatch(agent)) is None
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result is None
 
 
-def test_send_message_suppress_still_logs_assistant(tmp_path):
-    """Even when suppressing the auto-reply, the reply text must be
-    appended to agent.log so the next turn sees the narration as
-    context. Without this, the agent loses continuity when it uses
-    send_message mid-conversation."""
+def test_suppresses_when_send_message_matches_channel_name(tmp_path):
+    """The tool accepts a name OR id. ``general`` matches the
+    channel_name, which is enough for the channel half of the
+    match."""
+    agent = _agent(
+        "done",
+        tmp_path,
+        send_message_targets=[{"channel": "general", "root_id": ""}],
+    )
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result is None
+
+
+def test_suppresses_when_send_message_matches_thread(tmp_path):
+    """Incoming is a threaded reply; agent send_message's to the
+    same thread root — same slot, suppress."""
+    agent = _agent(
+        "ack",
+        tmp_path,
+        send_message_targets=[{"channel": "c-main", "root_id": "thread-abc"}],
+    )
+    result = _run(_dispatch(
+        agent, channel_id="c-main", channel_name="general", root_id="thread-abc"
+    ))
+    assert result is None
+
+
+def test_suppression_still_appends_to_agent_log(tmp_path):
+    """The suppressed reply must still land in ``agent.log`` so the
+    next turn sees it as context. Only the outbound post is skipped."""
     agent = _agent(
         "Replied in thread.",
         tmp_path,
-        tool_names=["mcp__puffo__send_message"],
+        send_message_targets=[{"channel": "c-main", "root_id": ""}],
     )
-    _run(_dispatch(agent))
+    _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
     assistants = _assistant_entries(agent)
     assert len(assistants) == 1
     assert "Replied in thread." in assistants[0]["content"]
 
 
-def test_send_message_alongside_other_tools_still_suppresses(tmp_path):
-    """A mixed turn (Read + Bash + send_message) still counts as
-    'agent already posted' — any send_message call triggers the
-    suppression regardless of how many other tools were used."""
+def test_suppresses_when_multiple_targets_include_current_slot(tmp_path):
+    """Agent fanned out — one send_message to another channel AND
+    one to the current slot. The current-slot one is enough to
+    trigger suppression."""
     agent = _agent(
-        "Let me read the file... done.",
+        "broadcasting",
         tmp_path,
-        tool_names=["Read", "Bash", "mcp__puffo__send_message"],
+        send_message_targets=[
+            {"channel": "other-channel", "root_id": ""},
+            {"channel": "c-main", "root_id": ""},
+        ],
     )
-    assert _run(_dispatch(agent)) is None
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result is None
 
 
-# ── no suppression when send_message wasn't involved ─────────────────────────
+# ── do NOT suppress: send_message landed elsewhere ──────────────────────────
 
 
-def test_plain_reply_without_tools_still_posts(tmp_path):
-    """Empty tool_names list (agent answered purely from knowledge)
-    must behave like the pre-fix path: reply gets posted."""
-    agent = _agent("Hello!", tmp_path, tool_names=[])
-    assert _run(_dispatch(agent)) == "Hello!"
-
-
-def test_reply_with_other_tools_but_no_send_message_still_posts(tmp_path):
-    """Agent used Read + Bash but did NOT call send_message — the
-    reply is the intended channel response and must be posted."""
+def test_does_not_suppress_when_send_message_targets_different_channel(tmp_path):
+    """Agent fanned out to ``#ops`` while narrating in the current
+    channel. Auto-reply in the current channel is legitimate —
+    must post."""
     agent = _agent(
-        "Found it: 42.",
+        "FYI, pinged #ops.",
+        tmp_path,
+        send_message_targets=[{"channel": "ops", "root_id": ""}],
+    )
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result == "FYI, pinged #ops."
+
+
+def test_does_not_suppress_when_send_message_targets_different_thread(tmp_path):
+    """Same channel but a different thread root. Auto-reply lands
+    in the current thread; the send_message is in a sibling thread.
+    Distinct conversations — must post."""
+    agent = _agent(
+        "still here.",
+        tmp_path,
+        send_message_targets=[{"channel": "c-main", "root_id": "thread-xyz"}],
+    )
+    result = _run(_dispatch(
+        agent, channel_id="c-main", channel_name="general", root_id="thread-abc"
+    ))
+    assert result == "still here."
+
+
+def test_does_not_suppress_top_level_send_message_when_incoming_is_threaded(tmp_path):
+    """send_message with empty root_id creates a new top-level post;
+    incoming is threaded. Auto-reply goes to the thread (empty
+    root_id wouldn't match), so NO duplicate — must post."""
+    agent = _agent(
+        "replying in thread.",
+        tmp_path,
+        send_message_targets=[{"channel": "c-main", "root_id": ""}],
+    )
+    result = _run(_dispatch(
+        agent, channel_id="c-main", channel_name="general", root_id="thread-abc"
+    ))
+    assert result == "replying in thread."
+
+
+def test_does_not_suppress_threaded_send_message_when_incoming_is_top_level(tmp_path):
+    """Inverse: agent replied in a thread via send_message, but
+    incoming (and so the auto-reply) is top-level in the channel.
+    Different slots — must post."""
+    agent = _agent(
+        "top-level reply.",
+        tmp_path,
+        send_message_targets=[{"channel": "c-main", "root_id": "thread-xyz"}],
+    )
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result == "top-level reply."
+
+
+def test_does_not_suppress_when_no_send_message_called(tmp_path):
+    """Agent used other tools (Read, Bash) but never send_message.
+    Must post — this is the path for the 'normal' narrative-reply
+    flow."""
+    agent = _agent(
+        "42",
         tmp_path,
         tool_names=["Read", "Bash"],
+        send_message_targets=[],
     )
-    assert _run(_dispatch(agent)) == "Found it: 42."
+    result = _run(_dispatch(agent))
+    assert result == "42"
 
 
-def test_metadata_without_tool_names_key_still_posts(tmp_path):
-    """Legacy adapters / ChatOnlyAdapter return no metadata — the
-    suppression check must fall through safely to the default
-    'post it' behaviour."""
-    agent = _agent("Hello!", tmp_path, tool_names=None)  # no metadata at all
-    assert _run(_dispatch(agent)) == "Hello!"
+def test_does_not_suppress_when_metadata_missing(tmp_path):
+    """Legacy adapters (e.g. ChatOnlyAdapter) don't populate
+    metadata at all. Fall through to the post-it path unchanged."""
+    agent = _agent("Hello!", tmp_path)  # no metadata kwargs
+    result = _run(_dispatch(agent))
+    assert result == "Hello!"
 
 
-# ── interaction with the [SILENT] check ──────────────────────────────────────
+# ── edge cases ──────────────────────────────────────────────────────────────
 
 
-def test_silent_still_suppresses_even_if_send_message_present(tmp_path):
-    """If the agent emits [SILENT] AND called send_message, the
-    [SILENT] branch wins (returns None before the send_message
-    branch is reached). Behaviour identical to today — this just
-    guards against a future reordering regressing it."""
+def test_empty_channel_target_is_ignored(tmp_path):
+    """If ``send_message`` was somehow invoked with an empty
+    channel string (shouldn't happen, but defensive) it can't
+    match anything — must not crash, must not false-suppress."""
+    agent = _agent(
+        "ok",
+        tmp_path,
+        send_message_targets=[{"channel": "", "root_id": ""}],
+    )
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result == "ok"
+
+
+def test_missing_root_id_in_target_treats_as_top_level(tmp_path):
+    """A send_message target dict without a ``root_id`` key must
+    be treated as empty (top-level). With empty incoming root_id,
+    that's a match."""
+    agent = _agent(
+        "ok",
+        tmp_path,
+        send_message_targets=[{"channel": "c-main"}],  # no root_id key
+    )
+    result = _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id=""))
+    assert result is None
+
+
+# ── interaction with the [SILENT] check ─────────────────────────────────────
+
+
+def test_silent_wins_over_send_message_suppression(tmp_path):
+    """[SILENT] branch runs first and returns None without touching
+    agent.log. If send_message was ALSO called, the [SILENT] path's
+    'no log append' behaviour is preserved — documented asymmetry."""
     agent = _agent(
         "[SILENT]",
         tmp_path,
-        tool_names=["mcp__puffo__send_message"],
+        send_message_targets=[{"channel": "c-main", "root_id": ""}],
     )
-    assert _run(_dispatch(agent)) is None
-
-
-def test_silent_does_not_append_assistant_log_entry(tmp_path):
-    """Paired with the above: the [SILENT] branch returns None
-    WITHOUT appending to agent.log. The send_message branch DOES
-    append. This test documents the asymmetry (the [SILENT]
-    contract has always been 'pretend we never spoke')."""
-    agent = _agent(
-        "[SILENT]",
-        tmp_path,
-        tool_names=["mcp__puffo__send_message"],
-    )
-    _run(_dispatch(agent))
+    assert _run(_dispatch(agent, channel_id="c-main", channel_name="general", root_id="")) is None
+    # [SILENT] contract: no assistant entry in the log.
     assert _assistant_entries(agent) == []

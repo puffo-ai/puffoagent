@@ -536,12 +536,17 @@ class ClaudeSession:
 
         reply_parts: list[str] = []
         tool_calls = 0
-        # Names of every tool the agent invoked this turn. Surfaced
-        # in TurnResult.metadata so the shell can suppress the auto-
-        # reply when ``mcp__puffo__send_message`` was used — otherwise
-        # narration text around the MCP call would post as a duplicate
-        # alongside what send_message already sent.
+        # Names of every tool invoked this turn. Kept for debug /
+        # audit; the shell's double-post decision uses the more
+        # precise ``send_message_targets`` below.
         tool_names_used: list[str] = []
+        # ``(channel, root_id)`` of every ``mcp__puffo__send_message``
+        # call. The shell compares these against the current turn's
+        # (channel_id/channel_name, root_id) to decide whether to
+        # suppress its auto-reply — otherwise narration text around
+        # the MCP call posts as a duplicate in the same conversation
+        # slot. Empty ``root_id`` = top-level post in the channel.
+        send_message_targets: list[dict] = []
         input_tokens = 0
         output_tokens = 0
         event_types_seen: list[str] = []
@@ -593,12 +598,19 @@ class ClaudeSession:
                             self.audit.write("assistant.text", text=text)
                     elif bt == "tool_use":
                         tool_calls += 1
-                        tool_names_used.append(block.get("name", ""))
+                        name = block.get("name", "")
+                        tool_input = block.get("input") or {}
+                        tool_names_used.append(name)
+                        if name == "mcp__puffo__send_message":
+                            send_message_targets.append({
+                                "channel": str(tool_input.get("channel", "")),
+                                "root_id": str(tool_input.get("root_id", "")),
+                            })
                         if self.audit is not None:
                             self.audit.write(
                                 "tool",
-                                name=block.get("name", ""),
-                                input=block.get("input") or {},
+                                name=name,
+                                input=tool_input,
                                 id=block.get("id", ""),
                             )
             elif t == "system":
@@ -648,6 +660,7 @@ class ClaudeSession:
             metadata={
                 "session_id": self._session_id,
                 "tool_names": tool_names_used,
+                "send_message_targets": send_message_targets,
             },
         )
 

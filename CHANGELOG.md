@@ -11,21 +11,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   immediately from inside the turn, but the adapter was also
   collecting every surrounding text block ("Let me read the
   file...", "Replied in thread.") into `TurnResult.reply`, which
-  the shell then posted as a second message. Now both `cli_session`
-  and `sdk` adapters surface the set of tool names invoked via
-  `TurnResult.metadata["tool_names"]`, and `PuffoAgent.handle_message`
-  suppresses its auto-reply when `mcp__puffo__send_message` is in
-  that list. The reply is still appended to `agent.log` so future
-  turns retain conversational context; only the outbound post is
-  skipped.
+  the shell then posted as a second message in the same slot.
 
-  Known limitation: if the agent uses `send_message` to fan out to
-  a **different** channel in the same turn and intended the
-  narration text for the current channel, that narration is also
-  suppressed. The primer steers agents away from mixing the two
-  patterns; a tool-input-aware fix (compare `send_message`'s
-  `channel` arg to the current `TurnContext`) is tracked as a
-  follow-up.
+  Both `cli_session` and `sdk` adapters now record each
+  `mcp__puffo__send_message` call's `(channel, root_id)` pair in
+  `TurnResult.metadata["send_message_targets"]`.
+  `PuffoAgent.handle_message` suppresses its auto-reply iff at
+  least one of those targets matches the current turn's slot —
+  the same `(channel_id, root_id)` the worker would post the
+  auto-reply to (see `portal/worker.py`, `post_message(channel_id,
+  reply, root_id=root_id)`).
+
+  Matching is precise, not a blanket "send_message used → suppress":
+
+  | Incoming `root_id` | `send_message` `root_id` | Same channel | Suppress? |
+  |---|---|---|---|
+  | `""` (top-level) | `""` | yes | **yes** — duplicate top-level posts |
+  | `"thread-abc"` | `"thread-abc"` | yes | **yes** — duplicate thread replies |
+  | `""` (top-level) | `"thread-abc"` | yes | no — different slots |
+  | `"thread-abc"` | `""` | yes | no — different slots |
+  | any | any | no | no — different channels |
+
+  Channel matching accepts either a channel_id or channel_name in
+  the tool's `channel` arg (MCP takes either form). Suppressed
+  replies are still appended to `agent.log` so future turns see
+  the narration as context; only the outbound post is skipped.
+
+  Known narrow limitation: DMs addressed via `@handle` form in
+  the `channel` arg won't match Mattermost's internal
+  `user1__user2` channel_name. Agents that DM via channel_id are
+  unaffected.
 
 ## [0.7.0] — 2026-04-23
 
