@@ -93,6 +93,23 @@ class PuffoAgent:
             self.logger.debug(f"[silent] [{channel_name}] @{sender}: agent chose not to reply")
             return None
 
+        # If the agent used ``send_message`` this turn, MCP already
+        # posted on its behalf. Any surrounding narration text
+        # ("Let me read the file...", "Replied in thread.") collected
+        # into result.reply would land as a duplicate message.
+        # Append to the conversation log so future turns have context,
+        # but suppress the auto-reply. Known limitation: if the agent
+        # fanned out to a DIFFERENT channel via send_message and its
+        # narration was meant for THIS channel, that narration is
+        # also suppressed — fan-out is rare and the primer steers
+        # agents to not mix the two patterns.
+        if "mcp__puffo__send_message" in result.metadata.get("tool_names", []):
+            self.logger.debug(
+                f"[suppress] [{channel_name}] @{sender}: send_message used, not double-posting"
+            )
+            self._append_assistant(channel_name, result.reply)
+            return None
+
         self._append_assistant(channel_name, result.reply)
         return result.reply
 

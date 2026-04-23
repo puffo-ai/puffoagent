@@ -4,6 +4,29 @@ All notable changes to `puffoagent` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-04-23
+
+### Fixed
+- **Double-post when the agent uses `send_message`.** MCP posts
+  immediately from inside the turn, but the adapter was also
+  collecting every surrounding text block ("Let me read the
+  file...", "Replied in thread.") into `TurnResult.reply`, which
+  the shell then posted as a second message. Now both `cli_session`
+  and `sdk` adapters surface the set of tool names invoked via
+  `TurnResult.metadata["tool_names"]`, and `PuffoAgent.handle_message`
+  suppresses its auto-reply when `mcp__puffo__send_message` is in
+  that list. The reply is still appended to `agent.log` so future
+  turns retain conversational context; only the outbound post is
+  skipped.
+
+  Known limitation: if the agent uses `send_message` to fan out to
+  a **different** channel in the same turn and intended the
+  narration text for the current channel, that narration is also
+  suppressed. The primer steers agents away from mixing the two
+  patterns; a tool-input-aware fix (compare `send_message`'s
+  `channel` arg to the current `TurnContext`) is tracked as a
+  follow-up.
+
 ## [0.7.0] — 2026-04-23
 
 Runtime management is now standardized around a 3D type system:

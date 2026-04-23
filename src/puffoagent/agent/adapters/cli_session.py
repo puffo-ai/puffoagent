@@ -536,6 +536,12 @@ class ClaudeSession:
 
         reply_parts: list[str] = []
         tool_calls = 0
+        # Names of every tool the agent invoked this turn. Surfaced
+        # in TurnResult.metadata so the shell can suppress the auto-
+        # reply when ``mcp__puffo__send_message`` was used — otherwise
+        # narration text around the MCP call would post as a duplicate
+        # alongside what send_message already sent.
+        tool_names_used: list[str] = []
         input_tokens = 0
         output_tokens = 0
         event_types_seen: list[str] = []
@@ -587,6 +593,7 @@ class ClaudeSession:
                             self.audit.write("assistant.text", text=text)
                     elif bt == "tool_use":
                         tool_calls += 1
+                        tool_names_used.append(block.get("name", ""))
                         if self.audit is not None:
                             self.audit.write(
                                 "tool",
@@ -638,7 +645,10 @@ class ClaudeSession:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tool_calls=tool_calls,
-            metadata={"session_id": self._session_id},
+            metadata={
+                "session_id": self._session_id,
+                "tool_names": tool_names_used,
+            },
         )
 
 
