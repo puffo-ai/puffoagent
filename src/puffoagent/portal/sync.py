@@ -96,9 +96,28 @@ async def _sync_once(session: aiohttp.ClientSession, base_url: str) -> None:
             return
         remote_agents = await resp.json()
 
+    # Map local dirs → bot_user_ids so the conflict resolver can tell
+    # "this is the same agent re-syncing" from "another agent wants
+    # the same derived name". Match by bot_token (stable even when
+    # display_name is renamed server-side).
+    local_owned_ids = _build_local_user_id_map(remote_agents)
+
+    # Process remotes oldest-first so the earliest-created agent
+    # claims the plain derived name; later collisions get a
+    # ``<base>-<user_id_prefix>`` suffix and the older agent's name
+    # stays stable. Anchored on server ``create_at`` so the ordering
+    # is deterministic across machines.
+    remote_agents_sorted = sorted(
+        remote_agents, key=lambda r: int(r.get("create_at") or 0),
+    )
+
     remote_by_id: dict[str, dict] = {}
-    for remote in remote_agents:
-        agent_id = _derive_agent_id(remote)
+    for remote in remote_agents_sorted:
+        agent_id = _derive_agent_id(
+            remote,
+            taken_ids=set(remote_by_id.keys()),
+            local_owned_ids=local_owned_ids,
+        )
         if not is_valid_agent_id(agent_id):
             logger.warning("server sync: skipping agent with invalid id %r", agent_id)
             continue
@@ -160,28 +179,128 @@ def _url_matches(a: str, b: str) -> bool:
     return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
 
 
-def _derive_agent_id(remote: dict) -> str:
-    """Compute a stable local agent id from the server's record.
+# Length budget for the ``<base>-<user_id_prefix>`` conflict-suffix
+# form. ``is_valid_agent_id`` caps identifiers at 64 chars total, and
+# we want 7 hex chars of user_id (≥ 2^28 uniqueness, enough for
+# reasonable collisions) plus one ``-``, so the base is truncated to
+# 64 - 1 - 7 = 56 before appending.
+_USER_ID_SUFFIX_LEN = 7
+_MAX_BASE_WITH_SUFFIX = 64 - 1 - _USER_ID_SUFFIX_LEN
 
-    Sanitises the display_name down to ASCII alphanumerics + ``-_`` so
-    the result can serve as both a filesystem dir name and match
-    ``is_valid_agent_id``. Falls back to the bot user id when the name
-    has no usable ASCII characters (e.g. "张三" → user id slug).
+
+def _ascii_slug(display_name: str) -> str:
+    """Sanitise a display_name down to ASCII alphanumerics + ``-_`` so
+    the result can serve as a filesystem dir name. Returns empty
+    string when the input has no usable ASCII characters.
     """
-    raw = remote.get("display_name") or remote.get("profile_name") or ""
-    raw = raw.strip().lower()
-    allowed = []
+    raw = (display_name or "").strip().lower()
+    allowed: list[str] = []
     for ch in raw:
         if ch.isascii() and ch.isalnum():
             allowed.append(ch)
         elif ch in " -_":
             allowed.append("-" if ch == " " else ch)
-    cleaned = "".join(allowed).strip("-_")
-    if cleaned:
-        return cleaned[:64]
-    # Fall back to the bot user id so CJK-only display names still
-    # produce a valid local agent directory.
-    return remote.get("user_id", "")[:26]
+    return "".join(allowed).strip("-_")
+
+
+def _derive_agent_id(
+    remote: dict,
+    *,
+    taken_ids: set[str] | None = None,
+    local_owned_ids: dict[str, str] | None = None,
+) -> str:
+    """Compute a stable local agent id from the server's record.
+
+    Strategy (avoids a migration for existing installs):
+
+      1. Produce an ASCII slug of ``display_name``. Empty slug (e.g.
+         CJK-only names like "张三") falls back to ``user_id`` — no
+         collision possible since user_ids are globally unique.
+      2. If the slug is free (not in ``taken_ids`` and not held by
+         a local dir whose stored bot matches a *different* user),
+         use it plain.
+      3. If the slug is already claimed by a different agent, append
+         ``-<first 7 chars of user_id>``. The first-created agent
+         keeps the plain name; subsequent collisions get suffixed.
+
+    ``taken_ids`` tracks slugs already assigned in THIS sync pass
+    (caller builds up the map as it iterates remotes oldest-first).
+    ``local_owned_ids`` maps each existing local dir → its matched
+    remote user_id, so an agent re-syncing on an upgrade-from-old
+    code keeps its plain name rather than being forced into the
+    suffixed form.
+    """
+    base = _ascii_slug(
+        remote.get("display_name") or remote.get("profile_name") or ""
+    )
+    user_id = (remote.get("user_id") or "").strip()
+
+    if not base:
+        # CJK-only / unusable name: use user_id wholesale. No
+        # collision possible since user_ids are globally unique.
+        return user_id[:26]
+
+    # Cap the base so ``<base>-<suffix>`` still fits in 64 chars if
+    # we need the suffix. Harmless when no suffix is needed.
+    base = base[:_MAX_BASE_WITH_SUFFIX]
+
+    taken = taken_ids or set()
+    local_map = local_owned_ids or {}
+
+    # Free: either nobody has claimed it this pass AND no local dir
+    # holds it for a different user, OR this exact user already owns
+    # the local dir (re-sync / upgrade from old code).
+    local_holder = local_map.get(base, "")
+    if base not in taken and (not local_holder or local_holder == user_id):
+        return base
+
+    # Conflict: disambiguate with a user_id suffix. If the suffixed
+    # form is ALSO taken somehow (two agents with identical user_id
+    # prefix + same base — vanishingly rare), fall through to the
+    # full user_id which is globally unique.
+    if user_id:
+        suffixed = f"{base}-{user_id[:_USER_ID_SUFFIX_LEN]}"
+        if suffixed not in taken:
+            return suffixed
+    return user_id[:26]
+
+
+def _build_local_user_id_map(
+    remote_agents: list[dict],
+) -> dict[str, str]:
+    """Walk the agents dir and, for each local agent.yml, look up
+    its ``mattermost.bot_token`` in the remote list to find the
+    owning user_id. Returns ``{local_dir_name: user_id}`` for every
+    local agent whose token matched a remote.
+
+    Used by ``_derive_agent_id``'s conflict check so an existing
+    local agent keeps its plain derived name on re-sync even when a
+    newer agent with the same display_name slug arrives — the older
+    one was there first; the newer one gets the suffix.
+    """
+    token_to_user_id: dict[str, str] = {}
+    for r in remote_agents:
+        tok = (r.get("bot_token") or r.get("token") or "").strip()
+        uid = (r.get("user_id") or "").strip()
+        if tok and uid:
+            token_to_user_id[tok] = uid
+
+    result: dict[str, str] = {}
+    try:
+        entries = list(agents_dir().iterdir())
+    except OSError:
+        return result
+    for p in entries:
+        if not p.is_dir():
+            continue
+        try:
+            cfg = AgentConfig.load(p.name)
+        except Exception:
+            continue
+        uid = token_to_user_id.get(cfg.mattermost.bot_token, "")
+        if uid:
+            result[p.name] = uid
+    return result
 
 
 def _apply_remote(agent_id: str, remote: dict) -> None:

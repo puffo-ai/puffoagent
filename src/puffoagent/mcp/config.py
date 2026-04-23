@@ -118,7 +118,7 @@ def stdio_sdk_config(
                 agent_id=agent_id, url=url, token=token, workspace=workspace,
                 team=team, owner_username=owner_username,
                 permission_timeout_seconds=permission_timeout_seconds,
-                runtime_kind="sdk",
+                runtime_kind="sdk-local",
             ),
         }
     }

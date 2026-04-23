@@ -29,7 +29,7 @@ class PuffoAgent:
         snapshot of the memory directory. It is the same content
         written to ``<workspace>/.claude/CLAUDE.md`` so CLI runtimes
         discover it via Claude Code's project-level file lookup while
-        SDK/chat-only see it here as a string.
+        sdk-local/chat-local see it here as a string.
         """
         self.adapter = adapter
         self.system_prompt = system_prompt

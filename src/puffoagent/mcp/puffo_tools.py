@@ -1405,7 +1405,7 @@ def _cfg_from_args() -> ToolsConfig:
     parser.add_argument(
         "--runtime-kind",
         default=os.environ.get("PUFFO_RUNTIME_KIND", ""),
-        choices=("", "cli-local", "cli-docker", "sdk"),
+        choices=("", "chat-local", "sdk-local", "cli-local", "cli-docker"),
         help="Which adapter spawned this server. Gates runtime-aware "
              "checks like the host-local-command rejection in "
              "install_mcp_server.",
@@ -1413,7 +1413,7 @@ def _cfg_from_args() -> ToolsConfig:
     parser.add_argument(
         "--harness",
         default=os.environ.get("PUFFO_HARNESS", ""),
-        choices=("", "claude-code", "hermes"),
+        choices=("", "claude-code", "hermes", "gemini-cli"),
         help="Which agent engine is running. Tools that only make "
              "sense under Claude Code (install_skill / refresh / "
              "install_mcp_server) return a clear error under "

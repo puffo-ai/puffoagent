@@ -211,6 +211,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     env_anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
     env_openai = os.environ.get("OPENAI_API_KEY", "")
+    env_google = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or ""
+    )
 
     def prompt(label: str, default: str = "") -> str:
         hint = f" [{default}]" if default else ""
@@ -220,7 +225,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             val = ""
         return val or default
 
-    cfg.default_provider = prompt("Default AI provider (anthropic|openai)", cfg.default_provider or "anthropic")
+    cfg.default_provider = prompt("Default AI provider (anthropic|openai|google)", cfg.default_provider or "anthropic")
 
     anth_key = cfg.anthropic.api_key or env_anthropic
     anth_key = prompt("Anthropic API key (blank to skip)", anth_key)
@@ -232,14 +237,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     if oai_key:
         cfg.openai = ProviderConfig(api_key=oai_key, model=cfg.openai.model or "gpt-4o")
 
+    goog_key = cfg.google.api_key or env_google
+    goog_key = prompt("Google API key (blank to skip; needed for cli-docker + gemini-cli)", goog_key)
+    if goog_key:
+        cfg.google = ProviderConfig(api_key=goog_key, model=cfg.google.model or "gemini-2.5-pro")
+
     cfg.save()
     print(f"wrote {daemon_yml_path()}")
     print(f"agents dir: {agents_dir()}")
     print()
     print("agent runtime choices (per agent, set at create time):")
-    print("  chat-only    conversational LLM, no tools (default, uses the keys above)")
-    print("  sdk          in-process Claude agent loop w/ tools  [pip install puffoagent[sdk]]")
-    print("  cli-local    claude CLI on the host, --dangerously-skip-permissions [run `claude login` first]")
+    print("  chat-local   conversational LLM, no tools (default, uses the keys above)")
+    print("  sdk-local    in-process agent SDK w/ tools  [pip install puffoagent[sdk]]")
+    print("  cli-local    claude CLI on the host, permission-proxy to Mattermost owner [run `claude login` first]")
     print("  cli-docker   claude CLI inside a per-agent container  [Docker + `claude login` on host]")
     print()
     print("next: puffoagent agent create --id <id> --runtime <kind> \\")
@@ -606,7 +616,7 @@ def cmd_agent_create(args: argparse.Namespace) -> int:
             team_name=args.team or "",
         ),
         runtime=RuntimeConfig(
-            kind=args.runtime or "chat-only",
+            kind=args.runtime or "chat-local",
             provider=args.provider or "",
             api_key=args.api_key or "",
             model=args.model or "",
@@ -650,14 +660,21 @@ def cmd_agent_list(args: argparse.Namespace) -> int:
     daemon_alive = is_daemon_alive()
     daemon_cfg = DaemonConfig.load()
     sync_url = (daemon_cfg.server.url or "").rstrip("/").lower()
-    fmt = "{id:<20}  {state:<8}  {runtime:<18}  {msgs:>6}  {uptime}"
-    print(fmt.format(id="ID", state="STATE", runtime="RUNTIME", msgs="MSGS", uptime="UPTIME"))
-    print("-" * 80)
+    # DISPLAY column carries the human-readable name so operators
+    # can tell ``d2d2`` from ``d2d2-bbbbbbb`` at a glance — the ID
+    # column becomes an opaque slug once display_name collisions
+    # force a user_id suffix (see ``_derive_agent_id`` in sync.py).
+    fmt = "{id:<24}  {name:<18}  {state:<8}  {runtime:<18}  {msgs:>6}  {uptime}"
+    print(fmt.format(
+        id="ID", name="DISPLAY", state="STATE",
+        runtime="RUNTIME", msgs="MSGS", uptime="UPTIME",
+    ))
+    print("-" * 100)
     for aid in agents:
         try:
             ac = AgentConfig.load(aid)
         except Exception as exc:
-            print(f"{aid:<20}  (error: {exc})")
+            print(f"{aid:<24}  (error: {exc})")
             continue
         rs = RuntimeState.load(aid)
         if rs is None:
@@ -688,7 +705,15 @@ def cmd_agent_list(args: argparse.Namespace) -> int:
         # which agents need re-auth. "ok" and "unknown" stay silent.
         if rs is not None and rs.health == "auth_failed":
             runtime = f"{runtime} [auth_failed]"
-        print(fmt.format(id=aid, state=ac.state, runtime=runtime, msgs=msgs, uptime=uptime))
+        # Truncate display_name for table alignment without hiding
+        # the collision-disambiguation signal in the ID column.
+        display = (ac.display_name or aid)
+        if len(display) > 18:
+            display = display[:17] + "…"
+        print(fmt.format(
+            id=aid, name=display, state=ac.state,
+            runtime=runtime, msgs=msgs, uptime=uptime,
+        ))
     return 0
 
 
@@ -1153,15 +1178,24 @@ def cmd_agent_runtime(args: argparse.Namespace) -> int:
         print(f"id:              {cfg.id}")
         print("runtime:")
         print(f"  kind:             {cfg.runtime.kind}")
-        print(f"  harness:          {cfg.runtime.harness}  (cli-local / cli-docker)")
         print(f"  provider:         {cfg.runtime.provider or '(default)'}")
+        print(f"  harness:          {cfg.runtime.harness}  (cli-local / cli-docker only)")
         print(f"  model:            {cfg.runtime.model or '(default)'}")
         print(f"  api_key:          {'(set)' if cfg.runtime.api_key else '(inherit)'}")
         print(f"  allowed_tools:    {cfg.runtime.allowed_tools or '[]'}")
         print(f"  docker_image:     {cfg.runtime.docker_image or '(bundled default)'}")
         print(f"  permission_mode:  {cfg.runtime.permission_mode}  (cli-local only)")
-        print(f"  max_turns:        {cfg.runtime.max_turns}  (sdk only)")
+        print(f"  max_turns:        {cfg.runtime.max_turns}  (sdk-local only)")
         return 0
+
+    # Validate the resulting triple before writing. Fails fast on
+    # e.g. --harness gemini-cli without --provider google. Same
+    # validator the daemon runs at AgentConfig.load.
+    from .runtime_matrix import validate_triple
+    result = validate_triple(cfg.runtime.kind, cfg.runtime.provider, cfg.runtime.harness)
+    if not result.ok:
+        print(f"error: {result.error}", file=sys.stderr)
+        return 2
 
     cfg.save()
     print(f"agent {agent_id!r} runtime updated:")
@@ -1300,11 +1334,15 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--profile", help="Path to a profile.md to copy (default: built-in template)")
     create.add_argument(
         "--runtime",
-        choices=["chat-only", "sdk", "cli-local", "cli-docker"],
-        default="chat-only",
-        help="Runtime adapter kind (default: chat-only)",
+        choices=["chat-local", "sdk-local", "cli-local", "cli-docker"],
+        default="chat-local",
+        help="Runtime adapter kind (default: chat-local)",
     )
-    create.add_argument("--provider", help="Chat-only: provider override (anthropic|openai)")
+    create.add_argument(
+        "--provider",
+        choices=["anthropic", "openai", "google"],
+        help="Model provider (default: anthropic)",
+    )
     create.add_argument("--api-key", help="Provider/runtime API key override")
     create.add_argument("--model", help="Model override")
     create.add_argument("--no-mention", action="store_true", help="Don't reply on @mention")
@@ -1344,12 +1382,20 @@ def build_parser() -> argparse.ArgumentParser:
     runtime.add_argument("id")
     runtime.add_argument(
         "--kind",
-        choices=["chat-only", "sdk", "cli-local", "cli-docker"],
+        choices=["chat-local", "sdk-local", "cli-local", "cli-docker"],
         help="Runtime adapter kind",
     )
-    runtime.add_argument("--provider", help="Chat-only: provider (anthropic|openai)")
+    runtime.add_argument(
+        "--provider",
+        choices=["anthropic", "openai", "google"],
+        help=(
+            "Model provider. anthropic (default) pairs with claude-code; "
+            "openai pairs with hermes; google reserved for gemini-cli. "
+            "Must match harness if harness is claude-code / gemini-cli."
+        ),
+    )
     runtime.add_argument("--model", help="Model override (empty string clears)")
-    runtime.add_argument("--api-key", help="Runtime API key (sdk/chat-only)")
+    runtime.add_argument("--api-key", help="Runtime API key (sdk-local / chat-local)")
     runtime.add_argument(
         "--allowed-tools",
         help="SDK: comma-separated tool allowlist patterns, e.g. Read,Edit,\"Bash(git *)\" — empty clears",
@@ -1375,13 +1421,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     runtime.add_argument(
         "--harness",
-        choices=["claude-code", "hermes"],
+        choices=["claude-code", "hermes", "gemini-cli"],
         help=(
             "cli-local / cli-docker: which agent engine runs inside the "
-            "runtime. 'claude-code' (default) spawns the claude CLI with "
-            "our stream-json session protocol. 'hermes' spawns `hermes chat` "
-            "one-shot per turn against the Anthropic API using Claude "
-            "Code's credential store. Hermes OAuth routes to Anthropic's "
+            "runtime. 'claude-code' (default, anthropic only) spawns the "
+            "claude CLI with our stream-json session protocol. 'hermes' "
+            "(anthropic + openai) spawns `hermes chat` one-shot per turn. "
+            "'gemini-cli' (google, reserved — not yet implemented) targets "
+            "Google's gemini CLI. Hermes OAuth routes to Anthropic's "
             "extra_usage pool, NOT your Claude subscription — see "
             "NousResearch/hermes-agent#12905."
         ),

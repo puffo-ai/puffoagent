@@ -86,7 +86,7 @@ class MattermostClient:
         # open them with its normal Read tool. The relative path
         # ``attachments/<post_id>/<filename>`` is what we surface in
         # the user-message preamble — relative so the same string
-        # works for SDK/chat-only (cwd=workspace on host) and for
+        # works for sdk-local/chat-local (cwd=workspace on host) and for
         # cli-docker (cwd=/workspace in container).
         self.workspace_dir = workspace_dir
         self.bot_user_id: str = ""

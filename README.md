@@ -60,8 +60,8 @@ Depends on the runtime each of your agents will use. Every agent is independent 
 
 | If you plan to use… | You need | Notes |
 |---|---|---|
-| `chat-only` | An Anthropic **or** OpenAI API key. | Set in `puffoagent init`. You pay the provider directly for tokens. |
-| `sdk` | An **Anthropic API key**. | Same key slot as `chat-only`. OpenAI isn't supported on this runtime — the SDK is Anthropic-only. Also run `pip install --user --upgrade "puffoagent[sdk]"`. |
+| `chat-local` | An Anthropic, OpenAI, **or** Google API key. | Set in `puffoagent init`. You pay the provider directly for tokens. |
+| `sdk-local` | An **Anthropic API key**. | Same key slot as `chat-local`. OpenAI / Google agent SDKs aren't wired up yet; the shipped SDK path is Anthropic-only. Also run `pip install --user --upgrade "puffoagent[sdk]"`. |
 | `cli-local` | **Claude Code CLI OAuth** — no API key. | Skip the key prompts in `init` if this is your only runtime. Set up auth by running `claude login` on the host *once* (see step 2b below). Billing is via your Claude Code subscription, not per-token. |
 | `cli-docker` | **Claude Code CLI OAuth** — no API key. | Same as `cli-local`: run `claude login` on the host once. Anthropic's rotating refresh tokens require the credentials file to be shared across every agent (and the host); cli-docker bind-mounts the host's `.credentials.json` (single-file overlay) into every container, cli-local symlinks to it. Everything else in `.claude/` — sessions, history, settings — is per-agent. |
 
@@ -114,38 +114,32 @@ Back on Puffo.ai:
 
 The webapp provisions a bot account, generates its token, and registers the agent with you as owner. Within 30 seconds your daemon picks it up, logs in as the bot, and starts responding. Add the bot to any channel and mention it to say hello.
 
-By default new agents use the **chat-only** runtime — plain conversational LLM replies, no tools. If you want an agent that can read files, run commands, or edit code, switch its runtime to one of the three *agentic* kinds described below.
+By default new agents use the **chat-local** runtime — plain conversational LLM replies, no tools. If you want an agent that can read files, run commands, or edit code, switch its runtime to one of the three *agentic* kinds described below.
 
 ---
 
 ## Runtime kinds
 
-Each agent picks one runtime. The choice is per-agent, not global — one daemon can host agents across all runtimes simultaneously.
+Every agent picks three orthogonal things: the **runtime** (where it executes), the **provider** (who serves the model), and — for CLI runtimes only — the **harness** (which agent engine runs inside). Not every combination is valid; the daemon rejects invalid triples at load time with a clear error.
 
-```
-┌─────────────┬──────────────────┬───────────────────────┬────────────────────┐
-│             │ Where tools run  │ Auth                  │ Sandbox            │
-├─────────────┼──────────────────┼───────────────────────┼────────────────────┤
-│ chat-only   │ (no tools)       │ API key               │ n/a                │
-│ sdk         │ In-process       │ API key               │ canUseTool allow-  │
-│             │ (claude-agent-   │                       │ list (callback per │
-│             │ sdk)             │                       │ tool call)         │
-│ cli-local   │ Host subprocess  │ OAuth (claude login)  │ none               │
-│ cli-docker  │ Per-agent Docker │ OAuth (claude login)  │ container          │
-│             │ container        │                       │                    │
-└─────────────┴──────────────────┴───────────────────────┴────────────────────┘
-```
+| Runtime | Where tools run | Providers | Harness |
+|---|---|---|---|
+| `chat-local` | (no tools) | anthropic, openai, google | n/a |
+| `sdk-local` | In-process agent SDK | anthropic (`claude-agent-sdk`) | n/a — the SDK is the harness |
+| `cli-local` | Host subprocess | depends on harness | claude-code (anthropic) · hermes (anthropic, openai) |
+| `cli-docker` | Per-agent Docker container | depends on harness | claude-code (anthropic) · hermes (anthropic, openai) · gemini-cli (google) |
+| `cli-sandbox` | *(reserved — future)* | — | — |
 
 Quick decision help:
 
-- **Just want a chatbot?** → `chat-only` (default).
-- **Want tools but no Docker?** → `sdk` with a tight allowlist.
+- **Just want a chatbot?** → `chat-local` (default). Pick `--provider anthropic` / `openai` / `google`.
+- **Want tools but no Docker?** → `sdk-local` with a tight allowlist.
 - **Have `claude` on the host, trust it fully?** → `cli-local` (agent runs on your host, no sandbox).
 - **Want full Claude Code with isolation?** → `cli-docker`.
 
 ### The three agentic runtimes
 
-#### 🔹 `sdk` — in-process Claude Agent SDK
+#### 🔹 `sdk-local` — in-process Claude Agent SDK
 
 The daemon embeds [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/). Every turn runs the full agent loop (tool call → execute → feed result back → iterate) inside the daemon's own Python process.
 
@@ -225,7 +219,7 @@ Runtime decides *where* the agent executes (host subprocess / docker container /
 | `claude-code` (default) | `claude` | long-lived stream-json subprocess + `--resume` | Full Claude Code skills/MCP/permission-mode suite; `install_skill`, `refresh`, etc. | `cli-local`, `cli-docker` |
 | `hermes` | `hermes chat -q --continue` per turn | One-shot per turn; hermes stores session in `~/.hermes/state.db` on disk, `--continue` resumes it | Hermes' own skills/memory/tools; Claude-Code-specific MCP tools return a clear error | **`cli-docker` only for now** — cli-local support needs separate design work (operator's own `~/.hermes/` isn't puffo-owned) |
 
-`sdk` / `chat-only` ignore the harness field.
+`sdk-local` / `chat-local` ignore the harness field.
 
 **Switch a cli-docker agent to Hermes:**
 
@@ -239,7 +233,7 @@ On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v8`
 
 ### How to set an agent's runtime
 
-Agents created via the Puffo.ai webapp start as `chat-only`. Two ways to change that:
+Agents created via the Puffo.ai webapp start as `chat-local`. Two ways to change that:
 
 **CLI (recommended):**
 
@@ -259,10 +253,11 @@ $EDITOR ~/.puffoagent/agents/<agent-id>/agent.yml
 
 ```yaml
 runtime:
-  kind: cli-docker             # chat-only | sdk | cli-local | cli-docker
-  harness: claude-code         # claude-code (cli-local + cli-docker) | hermes (cli-docker only)
+  kind: cli-docker             # chat-local | sdk-local | cli-local | cli-docker
+  provider: anthropic          # anthropic | openai | google (must match harness)
+  harness: claude-code         # claude-code (anthropic) | hermes (anthropic+openai) — CLI kinds only
   model: claude-sonnet-4-6     # optional; defaults to daemon config
-  api_key: ""                  # sdk / chat-only; CLI kinds ignore this
+  api_key: ""                  # sdk-local / chat-local; CLI kinds ignore this
   allowed_tools: []            # sdk only; ignored by CLI kinds
   docker_image: ""             # cli-docker only; empty = bundled default
 ```
@@ -423,7 +418,7 @@ Press `Ctrl+C` in the terminal running `puffoagent start`. In-flight workers are
 | Stale `pid=…` in status | Daemon crashed earlier. Delete `~/.puffoagent/daemon.pid` and start again. |
 | Agent stuck `offline` after webapp creation | Wait up to 30 s for the next sync tick. If still offline, check the daemon's log for auth errors on that agent's bot token. |
 | `runtime: error` in `agent list` | Open `~/.puffoagent/agents/<id>/runtime.json` — the `error` field has the reason. |
-| **SDK runtime:** `runtime kind 'sdk' requires the claude-agent-sdk package` | `pip install --user --upgrade puffoagent[sdk]` and restart the daemon. |
+| **SDK runtime:** `runtime kind 'sdk-local' requires the claude-agent-sdk package` | `pip install --user --upgrade puffoagent[sdk]` and restart the daemon. |
 | **SDK runtime:** agent keeps saying "tool not in allowed_tools" | Add the tool (and an arg pattern if needed) to `runtime.allowed_tools` in `agent.yml`. Wildcards follow `fnmatch` syntax. |
 | **cli-local / cli-docker:** auth errors | `~/.claude/.credentials.json` is missing or stale. Run `claude login` on the host. For cli-local, `puffoagent agent refresh-ping <id>` dumps credential state + a full subprocess trace so you can see exactly what's failing. |
 | **cli-local:** `claude binary not found on PATH` | `npm install -g @anthropic-ai/claude-code`, then confirm `claude --version` works in a fresh shell. |

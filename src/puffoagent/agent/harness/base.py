@@ -49,7 +49,7 @@ class Harness(ABC):
 
     @abstractmethod
     def name(self) -> str:
-        """Stable identifier — ``"claude-code"`` / ``"hermes"``."""
+        """Stable identifier — ``"claude-code"`` / ``"hermes"`` / etc."""
 
     def supports_claude_specific_tools(self) -> bool:
         """True when this harness uses the Claude Code skills-dir
@@ -58,3 +58,11 @@ class Harness(ABC):
         the project-scope MCP-server config the agent can write.
         Default False so new harnesses opt in deliberately."""
         return False
+
+    def supported_providers(self) -> frozenset[str]:
+        """Which model providers this harness can drive. Used by the
+        runtime-matrix validator to reject mismatched triples like
+        ``claude-code`` + ``google``. Default empty set means "not
+        declared" — concrete harnesses should override.
+        """
+        return frozenset()

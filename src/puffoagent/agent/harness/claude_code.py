@@ -31,3 +31,8 @@ class ClaudeCodeHarness(Harness):
 
     def supports_claude_specific_tools(self) -> bool:
         return True
+
+    def supported_providers(self) -> frozenset[str]:
+        # Claude Code is Anthropic-only. Routing through a proxy to
+        # a non-Anthropic model is not a supported configuration.
+        return frozenset({"anthropic"})

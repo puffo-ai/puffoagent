@@ -70,6 +70,8 @@ from ...mcp.config import (
 )
 from ...portal.state import (
     seed_claude_home,
+    sync_host_gemini_mcp_servers,
+    sync_host_gemini_skills,
     sync_host_mcp_servers,
     sync_host_skills,
 )
@@ -84,7 +86,7 @@ logger = logging.getLogger(__name__)
 # a rebuild without the user having to remember to prune the old
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
-DEFAULT_IMAGE = "puffo/agent-runtime:v8"
+DEFAULT_IMAGE = "puffo/agent-runtime:v9"
 
 # Pinned version of the Claude Code CLI baked into the image.
 # Floating (``npm install -g @anthropic-ai/claude-code``) was bad
@@ -93,6 +95,12 @@ DEFAULT_IMAGE = "puffo/agent-runtime:v8"
 # semantics under our feet. Bump this pin deliberately when a new
 # upstream release is verified against ``tests/``.
 CLAUDE_CODE_NPM_VERSION = "2.1.117"
+
+# Pinned version of the Gemini CLI (``@google/gemini-cli``). Same
+# reproducibility rationale as CLAUDE_CODE_NPM_VERSION above.
+# Verify against ``tests/`` and a live ``hermes``-style smoke test
+# before bumping.
+GEMINI_CLI_NPM_VERSION = "0.38.2"
 
 # Timeout for the refresh one-shot. A cold claude + OAuth refresh
 # round-trip + one-turn API call normally lands in 5-15s, but can
@@ -125,7 +133,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         python3 python3-pip \\
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code@__CLAUDE_CODE_VERSION__
+RUN npm install -g \\
+        @anthropic-ai/claude-code@__CLAUDE_CODE_VERSION__ \\
+        @google/gemini-cli@__GEMINI_CLI_VERSION__
 
 # Puffo MCP tools server dependencies. `--break-system-packages` is
 # required on Debian bookworm — PEP 668 marks /usr as externally
@@ -167,7 +177,11 @@ WORKDIR /workspace
 # them. Start from current EOF so we don't re-dump the full history
 # on every container restart.
 CMD ["sh", "-c", "set -eu; mkdir -p /workspace/.puffoagent; touch /workspace/.puffoagent/audit.log; echo \\"[$(date -u +%FT%TZ)] puffo agent=${PUFFO_AGENT_ID:-unknown} container starting; polling /workspace/.puffoagent/audit.log every 1s\\"; last=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); while :; do size=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); if [ \\"$size\\" -gt \\"$last\\" ]; then tail -c +$((last + 1)) /workspace/.puffoagent/audit.log; last=$size; elif [ \\"$size\\" -lt \\"$last\\" ]; then last=0; fi; sleep 1; done"]
-""".replace("__CLAUDE_CODE_VERSION__", CLAUDE_CODE_NPM_VERSION)
+""".replace(
+    "__CLAUDE_CODE_VERSION__", CLAUDE_CODE_NPM_VERSION,
+).replace(
+    "__GEMINI_CLI_VERSION__", GEMINI_CLI_NPM_VERSION,
+)
 
 
 class DockerCLIAdapter(Adapter):
@@ -187,6 +201,7 @@ class DockerCLIAdapter(Adapter):
         team: str = "",
         owner_username: str = "",
         harness=None,
+        google_api_key: str = "",
     ):
         self.agent_id = agent_id
         self.model = model
@@ -216,6 +231,11 @@ class DockerCLIAdapter(Adapter):
         self.mattermost_token = mattermost_token
         self.team = team
         self.owner_username = owner_username
+        # Only consulted when harness is gemini-cli — passed to the
+        # containerised ``gemini`` CLI via ``docker exec -e
+        # GEMINI_API_KEY=...`` per turn. Claude Code and hermes don't
+        # use it.
+        self.google_api_key = google_api_key
         # Which agent engine runs inside the container. Default is
         # Claude Code — the stream-json + --resume path. Hermes
         # swaps in a one-shot ``hermes chat -q`` per turn. See
@@ -231,7 +251,10 @@ class DockerCLIAdapter(Adapter):
         # container's hermes config yet? Flipped by
         # ``_ensure_hermes_mcp_registered`` on first turn after a
         # worker restart. Registration is idempotent (remove + add)
-        # so re-runs are safe if the flag gets out of sync.
+        # so re-runs are safe if the flag gets out of sync. (The
+        # gemini path doesn't need this — its MCP registration is
+        # written upfront to ``.gemini/settings.json`` by the host
+        # sync in ``_ensure_started``.)
         self._hermes_mcp_registered = False
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
@@ -239,6 +262,8 @@ class DockerCLIAdapter(Adapter):
         user_message = ctx.messages[-1]["content"] if ctx.messages else ""
         if self.harness.name() == "hermes":
             return await self._run_turn_hermes(user_message, ctx.system_prompt)
+        if self.harness.name() == "gemini-cli":
+            return await self._run_turn_gemini(user_message, ctx.system_prompt)
         session = self._ensure_session()
         return await session.run_turn(user_message, ctx.system_prompt)
 
@@ -504,6 +529,168 @@ class DockerCLIAdapter(Adapter):
             "session_id": session_id,
         })
 
+    # ── Gemini harness ────────────────────────────────────────────
+
+    async def _run_turn_gemini(
+        self, user_message: str, system_prompt: str,
+    ) -> TurnResult:
+        """One-shot gemini-cli turn via ``gemini -p <prompt>
+        --output-format json [-r latest]``.
+
+        Structured like the hermes path: a thin entry that delegates
+        to a ``_run_gemini_chat`` helper which handles the stale-
+        resume retry.
+
+        Auth: ``GEMINI_API_KEY`` read from daemon.yml's
+        ``google.api_key`` and passed via ``docker exec -e``. Unlike
+        hermes we do NOT piggyback on Claude Code's credential file
+        — Google's API keys and Anthropic's OAuth tokens are
+        unrelated identity spaces.
+
+        Session continuity: gemini's ``-r latest`` resumes the most
+        recent session for this project (keyed by cwd hash under
+        ``~/.gemini/``). We use our ``cli_session.json`` sentinel to
+        decide whether to pass ``-r`` at all — same pattern as
+        hermes. Stale sentinel → fall back to a fresh session.
+
+        Persona + memory: written to ``<agent_home>/.gemini/GEMINI.md``
+        by the worker on every start; gemini auto-discovers it via
+        ``$HOME/.gemini/GEMINI.md`` on each turn. No first-turn
+        stitching needed.
+
+        MCP tools: registered upfront in
+        ``<workspace>/.gemini/settings.json`` (project scope —
+        gemini's MCP resolver defaults to cwd, not $HOME) by
+        ``sync_host_gemini_mcp_servers``. Same file gets any host
+        user-level MCPs merged in during the same write, so agents
+        inherit both the operator's gemini MCPs and the puffo one.
+        """
+        return await self._run_gemini_chat(user_message, system_prompt)
+
+    async def _run_gemini_chat(
+        self, user_message: str, system_prompt: str, *, _retried: bool = False,
+    ) -> TurnResult:
+        if not self.google_api_key:
+            logger.error(
+                "agent %s: gemini-cli turn requires google.api_key in "
+                "daemon.yml (passed as GEMINI_API_KEY to the container). "
+                "run `puffoagent init` or edit daemon.yml to set it.",
+                self.agent_id,
+            )
+            return TurnResult(reply="", metadata={
+                "error": "no google api_key configured in daemon.yml",
+            })
+
+        # Persona + memory arrive via ``~/.gemini/GEMINI.md`` (written
+        # by the worker on every start) and the puffo MCP entry lives
+        # in ``~/.gemini/settings.json`` (written by
+        # ``sync_host_gemini_mcp_servers`` in ``_ensure_started``),
+        # so there's no first-turn stitching or runtime subprocess
+        # registration to do here — just send the user message.
+        has_prior_session = self.session_file.exists()
+        cmd = _build_gemini_argv(
+            container_name=self.container_name,
+            api_key=self.google_api_key,
+            model=self.model,
+            has_prior_session=has_prior_session,
+            user_message=user_message,
+        )
+
+        # Log the full argv (with the API key redacted) so a failed
+        # turn is reproducible from the daemon log alone. Each argv
+        # element becomes one space-separated token in the log so
+        # operators can tell "--prompt=..." from a separate "-p"
+        # invocation at a glance.
+        redacted = [
+            "GEMINI_API_KEY=***" if a.startswith("GEMINI_API_KEY=") else a
+            for a in cmd
+        ]
+        logger.info("agent %s: gemini argv: %s", self.agent_id, " ".join(redacted))
+
+        started = time.time()
+        rc, stdout, stderr = await _run_cmd(cmd, check=False)
+        elapsed = time.time() - started
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+
+        # Stale sentinel recovery: if ``-r latest`` failed and we
+        # haven't already retried, clear the sentinel and start a
+        # fresh session. We're deliberately permissive here — any
+        # error with ``-r`` in play triggers retry — because the
+        # upstream docs don't pin an error string to key off and
+        # "fresh start" is always safer than a hard turn failure.
+        if rc != 0 and has_prior_session and not _retried:
+            logger.info(
+                "agent %s: gemini -r latest rc=%d; clearing sentinel "
+                "and retrying with a fresh session. stderr: %s",
+                self.agent_id, rc, stderr_text.strip()[-200:] or "(empty)",
+            )
+            try:
+                self.session_file.unlink()
+            except OSError:
+                pass
+            return await self._run_gemini_chat(
+                user_message, system_prompt, _retried=True,
+            )
+
+        if rc != 0:
+            logger.error(
+                "agent %s: gemini turn rc=%d in %.1fs | stdout: %r | stderr: %s",
+                self.agent_id, rc, elapsed,
+                stdout_text.strip()[:400],
+                stderr_text.strip()[-400:] or "(empty)",
+            )
+            return TurnResult(reply="", metadata={
+                "error": f"gemini exited rc={rc}",
+                "stdout_snippet": stdout_text[:400],
+                "stderr_tail": stderr_text[-400:],
+            })
+
+        reply, session_id, err = _parse_gemini_reply(stdout_text)
+        if err:
+            logger.warning(
+                "agent %s: gemini rc=0 but returned JSON error: %s",
+                self.agent_id, err,
+            )
+        if not reply:
+            logger.warning(
+                "agent %s: gemini rc=0 but parser found no reply. "
+                "stdout: %r", self.agent_id, stdout_text[:400],
+            )
+
+        if not has_prior_session:
+            try:
+                self.session_file.parent.mkdir(parents=True, exist_ok=True)
+                self.session_file.write_text(
+                    json.dumps({
+                        "harness": "gemini-cli",
+                        "session_id": session_id,
+                        "first_turn_at": int(time.time()),
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "agent %s: couldn't write gemini session_file: %s "
+                    "(next turn will start a fresh session)",
+                    self.agent_id, exc,
+                )
+
+        logger.info(
+            "agent %s: gemini turn rc=0 in %.1fs, %d reply chars, "
+            "session=%s, resume=%s%s",
+            self.agent_id, elapsed, len(reply), session_id or "?",
+            has_prior_session,
+            f", err={err!r}" if err else "",
+        )
+        metadata: dict = {
+            "harness": "gemini-cli",
+            "session_id": session_id,
+        }
+        if err:
+            metadata["error"] = err
+        return TurnResult(reply=reply, metadata=metadata)
+
     async def warm(self, system_prompt: str) -> None:
         """Start the container + claude subprocess eagerly at daemon
         start. Only spawns the subprocess if this agent has a
@@ -753,6 +940,62 @@ class DockerCLIAdapter(Adapter):
                     "otherwise this MCP will fail on first use.",
                     self.agent_id, name, cmd,
                 )
+
+            # Gemini-side host sync — skills tree + ``mcpServers``
+            # merged from ``~/.gemini/settings.json``. Always runs
+            # (cheap when the host has no ~/.gemini/) so swapping
+            # harness to gemini-cli doesn't need another container
+            # rebuild.
+            #
+            # Target is the PROJECT-SCOPE gemini dir under the
+            # workspace (``<workspace>/.gemini/``), not the user-
+            # scope ``<agent_home>/.gemini/``. Gemini's MCP resolver
+            # defaults to project scope — verified empirically by
+            # running ``gemini mcp add`` inside the container without
+            # a ``--scope`` flag: it writes to ``<cwd>/.gemini/
+            # settings.json``, and ``gemini mcp list`` from that cwd
+            # ignores anything in ``$HOME/.gemini/settings.json``.
+            # Writing to user scope silently dropped our puffo MCP
+            # and no tool calls reached the agent.
+            gemini_project_dir = Path(self.workspace_dir)
+            gemini_skill_count = sync_host_gemini_skills(
+                host_home, gemini_project_dir,
+            )
+            if gemini_skill_count:
+                logger.info(
+                    "agent %s: synced %d host gemini skill(s) into %s",
+                    self.agent_id, gemini_skill_count,
+                    gemini_project_dir / ".gemini" / "skills",
+                )
+            # Inject the puffo MCP entry in the same write so the
+            # project settings.json is consistent in one pass —
+            # no separate ``gemini mcp add`` subprocess to race.
+            puffo_entry = _puffo_gemini_mcp_entry(
+                agent_id=self.agent_id,
+                mattermost_url=self.mattermost_url,
+                mattermost_token=self.mattermost_token,
+                team=self.team,
+                owner_username=self.owner_username,
+            )
+            merged_gemini_mcp, gemini_unreachable = sync_host_gemini_mcp_servers(
+                host_home, gemini_project_dir,
+                extra_servers={"puffo": puffo_entry} if puffo_entry else None,
+            )
+            if merged_gemini_mcp:
+                logger.info(
+                    "agent %s: merged %d host gemini MCP server "
+                    "registration(s) into .gemini/settings.json",
+                    self.agent_id, merged_gemini_mcp,
+                )
+            for name, cmd in gemini_unreachable:
+                logger.warning(
+                    "agent %s: host gemini MCP %r command %r looks "
+                    "host-local and won't resolve inside the container. "
+                    "Install the binary in the image or bind-mount it, "
+                    "otherwise the MCP will fail on first use.",
+                    self.agent_id, name, cmd,
+                )
+
             if not (host_home / ".claude" / ".credentials.json").exists():
                 logger.warning(
                     "agent %s: host has no %s — run `claude login` on the "
@@ -835,6 +1078,11 @@ class DockerCLIAdapter(Adapter):
         # target and claude CLI then errors parsing it as JSON).
         agent_claude_json = self.agent_home_dir / ".claude.json"
         agent_claude_json.touch(exist_ok=True)
+        # ``.gemini/`` is a DIR. Pre-create it so the bind-mount
+        # below resolves to an existing path — otherwise Docker
+        # creates one owned by root at mount time, which the non-
+        # root ``agent`` user can't write to.
+        (self.agent_home_dir / ".gemini").mkdir(parents=True, exist_ok=True)
         self.shared_fs_dir.mkdir(parents=True, exist_ok=True)
         # Write the MCP server script to the mcp_script_dir so it gets
         # bind-mounted into the container. Idempotent — overwrites on
@@ -842,15 +1090,17 @@ class DockerCLIAdapter(Adapter):
         # without an image rebuild.
         export_mcp_script(self.mcp_script_dir)
 
-        # Six bind-mounts for every cli-docker agent:
+        # Seven bind-mounts for every cli-docker agent:
         #   1. workspace        — per-agent project root + cwd.
         #   2. .claude dir      — per-agent claude identity (sessions,
         #                         history, settings, cache).
         #   3. .credentials.json — SHARED with host (single file
         #                         overlay; see docstring).
         #   4. .claude.json     — per-agent CLI user-level config.
-        #   5. shared_fs        — cross-agent cooperation dir.
-        #   6. mcp_script_dir   — host puffo_tools.py for the MCP
+        #   5. .gemini dir      — per-agent gemini identity (GEMINI.md,
+        #                         skills, settings.json with mcpServers).
+        #   6. shared_fs        — cross-agent cooperation dir.
+        #   7. mcp_script_dir   — host puffo_tools.py for the MCP
         #                         server (read-only).
         # Project-level .claude/ lives INSIDE workspace_dir already,
         # so the workspace mount covers both project config and
@@ -883,6 +1133,15 @@ class DockerCLIAdapter(Adapter):
             # restart, producing a "config file not found" warning
             # every spawn.
             "-v", f"{agent_claude_json}:/home/agent/.claude.json",
+            # Per-agent gemini identity. Mirrors the .claude mount
+            # above — ``GEMINI.md`` (managed by the worker), synced
+            # host skills under ``.gemini/skills/``, and host+puffo
+            # MCP registrations in ``.gemini/settings.json`` all live
+            # under ``<agent_home>/.gemini/`` and land at
+            # ``/home/agent/.gemini`` inside the container. Always
+            # mounted regardless of harness so swapping to gemini-
+            # cli doesn't need a rebuild; empty when unused.
+            "-v", f"{self.agent_home_dir / '.gemini'}:/home/agent/.gemini",
             # Cross-agent cooperation dir — every agent sees the
             # same mount at /workspace/.shared. Use for file-level
             # coordination between bots.
@@ -1063,6 +1322,140 @@ def _parse_hermes_reply(stdout_text: str) -> tuple[str, str]:
         content.append(line)
     reply = "\n".join(content).strip()
     return reply, session_id
+
+
+def _puffo_gemini_mcp_entry(
+    *,
+    agent_id: str,
+    mattermost_url: str,
+    mattermost_token: str,
+    team: str,
+    owner_username: str,
+) -> dict | None:
+    """Build the settings.json entry gemini-cli needs to spawn the
+    puffo MCP server. Shape matches gemini's ``mcpServers`` schema
+    (command + args + env). Returns ``None`` when we don't have
+    the Mattermost pair — the MCP is useless without it, and
+    emitting an entry that can't reach the server would surface a
+    confusing error to the agent.
+    """
+    if not (mattermost_url and mattermost_token):
+        return None
+    env = mcp_env(
+        agent_id=agent_id,
+        url=mattermost_url,
+        token=mattermost_token,
+        workspace="/workspace",
+        team=team,
+        owner_username=owner_username,
+        runtime_kind="cli-docker",
+        harness="gemini-cli",
+    )
+    return {
+        "command": "python3",
+        "args": ["/opt/puffoagent-mcp/puffo_tools.py"],
+        "env": env,
+    }
+
+
+def _build_gemini_argv(
+    *,
+    container_name: str,
+    api_key: str,
+    model: str,
+    has_prior_session: bool,
+    user_message: str,
+) -> list[str]:
+    """Assemble the ``docker exec ... gemini ...`` argv for one turn.
+
+    Extracted so the dash-leading-value invariant is directly
+    testable: our turn preamble lines start with ``- `` (markdown
+    list syntax) and yargs treats a separate argv that begins with
+    ``-`` as another flag. Using ``--prompt=<value>`` instead of
+    ``-p <value>`` keeps the whole prompt in a single argv token
+    and forces yargs to read everything after ``=`` as the option's
+    value — dashes, newlines, CJK, and all.
+    """
+    cmd = [
+        "docker", "exec", "-i",
+        "-e", f"GEMINI_API_KEY={api_key}",
+        container_name,
+        "gemini",
+    ]
+    if model:
+        cmd.extend(["--model", _gemini_model_id(model)])
+    if has_prior_session:
+        cmd.extend(["-r", "latest"])
+    cmd.extend([
+        "--output-format", "json",
+        f"--prompt={user_message}",
+    ])
+    return cmd
+
+
+def _gemini_model_id(model: str) -> str:
+    """Translate the agent's ``runtime.model`` into the form
+    ``gemini --model`` expects.
+
+    Gemini model ids (``gemini-2.5-pro``, ``gemini-2.5-flash``)
+    don't use the provider-prefix shape hermes wants; we just pass
+    through whatever the operator set. Claude-style ``[1m]``
+    suffixes aren't meaningful here but we strip them anyway to be
+    forgiving of copy-paste from other harnesses. Empty / missing
+    → a sensible default.
+    """
+    base = (model or "").split("[", 1)[0].strip()
+    if not base:
+        return "gemini-2.5-pro"
+    return base
+
+
+def _parse_gemini_reply(stdout_text: str) -> tuple[str, str, str]:
+    """Pull the reply / session id / error from ``gemini -p ...
+    --output-format json`` stdout.
+
+    Shape observed on gemini-cli 0.38.2::
+
+        {
+          "session_id": "<uuid>",
+          "response": "<assistant text>",
+          "stats": {...big nested model/tool/file usage block...}
+        }
+
+    On structured failure the ``response`` is missing and a nested
+    ``error`` object takes its place::
+
+        {
+          "session_id": "<uuid>",
+          "error": {"type": "Error", "message": "...", "code": 1}
+        }
+
+    Falls back to the raw stdout text when JSON parse fails — a few
+    upstream failure modes print plain text despite ``--output-format
+    json``. If the raw text is gemini's help banner (``Usage:
+    gemini``) we explicitly return an error rather than leaking the
+    banner as the agent's reply; that situation typically means we
+    sent a malformed argv.
+    """
+    stdout_text = stdout_text.strip()
+    if not stdout_text:
+        return "", "", ""
+    try:
+        obj = json.loads(stdout_text)
+    except (json.JSONDecodeError, ValueError):
+        if stdout_text.startswith("Usage: gemini"):
+            return "", "", "gemini printed its --help banner instead of a reply; argv likely malformed"
+        return stdout_text, "", ""
+    if not isinstance(obj, dict):
+        return stdout_text, "", ""
+    reply = str(obj.get("response", "") or "")
+    session_id = str(obj.get("session_id", "") or "")
+    err_raw = obj.get("error")
+    if isinstance(err_raw, dict):
+        err = str(err_raw.get("message", "") or err_raw.get("type", "") or "unknown error")
+    else:
+        err = str(err_raw or "")
+    return reply.strip(), session_id, err
 
 
 async def _run_cmd(cmd: list[str], check: bool = True) -> tuple[int, bytes, bytes]:

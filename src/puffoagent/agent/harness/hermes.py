@@ -45,4 +45,11 @@ from .base import Harness
 class HermesHarness(Harness):
     def name(self) -> str:
         return "hermes"
+
+    def supported_providers(self) -> frozenset[str]:
+        # Hermes is multi-provider. Anthropic works via Claude Code's
+        # credential file (the cli-docker path we already ship);
+        # OpenAI works via an OPENAI_API_KEY the operator provides.
+        # Google / Gemini isn't supported by upstream hermes today.
+        return frozenset({"anthropic", "openai"})
     # supports_claude_specific_tools() → False (inherited default).

@@ -181,12 +181,12 @@ class LocalCLIAdapter(Adapter):
         # pass. Reject loudly at construction so the daemon log
         # makes the constraint obvious rather than the adapter
         # silently acting like claude-code.
-        if harness.name() == "hermes":
+        if harness.name() in ("hermes", "gemini-cli"):
             raise RuntimeError(
-                f"agent {agent_id!r}: runtime.harness=hermes is not "
-                "supported with runtime.kind=cli-local yet. Use "
-                "runtime.kind=cli-docker for hermes, or switch "
-                "runtime.harness back to claude-code."
+                f"agent {agent_id!r}: runtime.harness={harness.name()!r} is "
+                "not supported with runtime.kind=cli-local yet. Use "
+                "runtime.kind=cli-docker, or switch runtime.harness "
+                "back to claude-code."
             )
         self.harness = harness
         self._verified = False

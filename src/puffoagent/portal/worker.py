@@ -30,6 +30,7 @@ from ..agent.shared_content import (
     read_shared_primer,
     sync_shared_skills,
     write_claude_md,
+    write_gemini_md,
 )
 from .state import (
     AgentConfig,
@@ -61,21 +62,26 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
     """Select and construct the adapter for an agent based on
     ``runtime.kind``. Raises if the selected kind is unknown or
     misconfigured.
-    """
-    kind = agent_cfg.runtime.kind or "chat-only"
 
-    if kind == "chat-only":
+    ``runtime.kind`` values are the 0.7.0-era spellings
+    (``chat-local`` / ``sdk-local`` / ``cli-local`` / ``cli-docker``).
+    The pre-0.7.0 shorthand (``chat-only`` / ``sdk``) is already
+    translated to the new form by ``AgentConfig.load``.
+    """
+    kind = agent_cfg.runtime.kind or "chat-local"
+
+    if kind == "chat-local":
         from ..agent.adapters.chat_only import ChatOnlyAdapter
         provider = _build_legacy_provider(daemon_cfg, agent_cfg.runtime)
         return ChatOnlyAdapter(provider)
 
-    if kind == "sdk":
+    if kind == "sdk-local":
         from ..agent.adapters.sdk import SDKAdapter
         api_key = agent_cfg.runtime.api_key or daemon_cfg.anthropic.api_key
         model = agent_cfg.runtime.model or daemon_cfg.anthropic.model or "claude-sonnet-4-6"
         if not api_key:
             raise RuntimeError(
-                f"agent {agent_cfg.id!r}: runtime kind 'sdk' requires an anthropic "
+                f"agent {agent_cfg.id!r}: runtime kind 'sdk-local' requires an anthropic "
                 "api_key in daemon.yml or agent.yml"
             )
         return SDKAdapter(
@@ -98,6 +104,22 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
     if kind == "cli-docker":
         from ..agent.adapters.docker_cli import DockerCLIAdapter
         from ..agent.harness import build_harness
+        harness = build_harness(agent_cfg.runtime.harness)
+        # gemini-cli needs its own API key threaded through (passed
+        # as GEMINI_API_KEY on docker exec per turn). Claude Code
+        # and hermes both use the host's bind-mounted Claude Code
+        # credentials file instead, so the field stays empty for
+        # them — the adapter only reads google_api_key when harness
+        # is gemini-cli.
+        google_key = ""
+        if harness.name() == "gemini-cli":
+            google_key = daemon_cfg.google.api_key
+            if not google_key:
+                raise RuntimeError(
+                    f"agent {agent_cfg.id!r}: harness=gemini-cli requires a "
+                    "google.api_key in daemon.yml (set via `puffoagent init` or "
+                    "by editing ~/.puffoagent/daemon.yml)."
+                )
         return DockerCLIAdapter(
             agent_id=agent_cfg.id,
             model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
@@ -111,7 +133,8 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             mattermost_url=agent_cfg.mattermost.url,
             mattermost_token=agent_cfg.mattermost.bot_token,
             team=agent_cfg.mattermost.team_name,
-            harness=build_harness(agent_cfg.runtime.harness),
+            harness=harness,
+            google_api_key=google_key,
         )
 
     if kind == "cli-local":
@@ -150,13 +173,13 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
 
     raise RuntimeError(
         f"agent {agent_cfg.id!r}: unknown runtime kind {kind!r} "
-        "(valid: chat-only, sdk, cli-docker, cli-local)"
+        "(valid: chat-local, sdk-local, cli-docker, cli-local)"
     )
 
 
 def _build_legacy_provider(daemon_cfg: DaemonConfig, runtime: RuntimeConfig):
     """Build an Anthropic/OpenAI message-completion provider for the
-    chat-only adapter. Per-agent overrides win over daemon defaults.
+    chat-local adapter. Per-agent overrides win over daemon defaults.
     """
     provider_name = runtime.provider or daemon_cfg.default_provider
 
@@ -241,7 +264,7 @@ class Worker:
             # ``$HOME/.claude/CLAUDE.md`` on subprocess spawn. The
             # project-level ``<workspace>/CLAUDE.md`` is deliberately
             # left untouched — that's the agent's own editable layer.
-            # SDK/chat-only adapters don't auto-discover, so we also
+            # sdk-local / chat-local adapters don't auto-discover, so we also
             # hand the string to PuffoAgent as ``system_prompt``.
             shared_path = docker_shared_dir()
             ensure_shared_primer(shared_path)
@@ -257,6 +280,15 @@ class Worker:
                 memory_snapshot=read_memory_snapshot(Path(memory_path)),
             )
             write_claude_md(agent_claude_user_dir(agent_id), claude_md)
+
+            # Mirror the same managed content into GEMINI.md at the
+            # user-level gemini dir, so Gemini CLI auto-discovers it
+            # via ``$HOME/.gemini/GEMINI.md``. Written regardless of
+            # harness choice — cheap (one file), keeps the agent
+            # ready for a harness swap without another sync cycle.
+            write_gemini_md(
+                agent_home_dir(agent_id) / ".gemini", claude_md,
+            )
 
             # One-time migration: earlier versions wrote the managed
             # CLAUDE.md into ``<workspace>/.claude/CLAUDE.md``. If

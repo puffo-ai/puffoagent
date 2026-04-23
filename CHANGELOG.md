@@ -4,6 +4,166 @@ All notable changes to `puffoagent` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-04-23
+
+Runtime management is now standardized around a 3D type system:
+(**runtime**, **provider**, **harness**). Breaking change to
+`runtime.kind` values in `agent.yml`, with a one-release migration
+shim.
+
+### Breaking changes
+- **`runtime.kind` rename:** `chat-only` → `chat-local`, `sdk` →
+  `sdk-local`. `cli-local` and `cli-docker` are unchanged. Existing
+  `agent.yml` files with the old values are auto-migrated on load
+  with a one-line WARNING in the daemon log; operators should
+  update by running `puffoagent agent runtime <id> --kind chat-local`
+  (or `sdk-local`) once to persist the new spelling. The shim stays
+  through 0.7.x and is removed in 0.8.
+- **Invalid (runtime, provider, harness) triples now fail fast at
+  load** rather than silently misbehaving. Examples rejected:
+  `harness=gemini-cli` without `provider=google`; `harness=claude-code`
+  with `provider=openai`; `kind=cli-sandbox` (reserved, not yet
+  implemented).
+
+### Added
+- **`portal/runtime_matrix.py`** — single source of truth for the
+  (runtime, provider, harness) validity matrix. Constants,
+  `validate_triple()`, `migrate_legacy_kind()`, and default-resolver
+  helpers are all co-located here so adapters, the CLI, and tests
+  share one definition.
+- **`provider` as first-class** across every runtime kind, not just
+  `chat-local`. Declared values: `anthropic` / `openai` / `google`.
+  `puffoagent agent runtime --provider` now takes a `choices=`
+  constrained list.
+- **`gemini-cli` harness on `cli-docker`.** Ships Google's
+  `@google/gemini-cli@0.38.2` inside the puffo-agent-runtime image
+  and drives it via `gemini -p <prompt> --output-format json
+  [-r latest]` per turn. Auth is a static `GEMINI_API_KEY` from
+  the daemon's `google.api_key` (set via `puffoagent init` or by
+  editing `daemon.yml`). Session continuity uses gemini's built-in
+  `-r latest` resume with our existing `cli_session.json` sentinel;
+  stale-session retry falls back to a fresh start. `cli-local`
+  rejects `harness=gemini-cli` with the same operator-sessions-
+  collision reason as hermes — use `cli-docker` for now.
+- **Gemini workspace provisioning** mirrors the Claude Code path,
+  with one scope-split that's load-bearing for tool access:
+  - `GEMINI.md` at `<agent_home>/.gemini/GEMINI.md` (**user scope**)
+    written by the worker with the assembled primer + profile +
+    memory snapshot. Gemini auto-discovers it via
+    `$HOME/.gemini/GEMINI.md` every turn — no first-turn prompt-
+    stitching needed. Operators can still own a project-level
+    `<workspace>/GEMINI.md` for per-workspace overrides; gemini
+    concatenates hierarchically.
+  - Host skill sync: `sync_host_gemini_skills(host_home,
+    project_dir)` copies `~/.gemini/skills/<name>/` →
+    `<project_dir>/.gemini/skills/<name>/` (**project scope**).
+    Caller passes `workspace_dir` as `project_dir` — gemini's
+    skill resolver keys off cwd.
+  - Host MCP sync: `sync_host_gemini_mcp_servers(host_home,
+    project_dir, extra_servers={"puffo": ...})` writes to
+    `<workspace>/.gemini/settings.json` (**project scope** — see
+    below). Merges operator's host-level MCPs and injects the puffo
+    MCP entry in a single write, preserving every non-`mcpServers`
+    key. No separate `gemini mcp add` subprocess to race with.
+  - Scope split rationale: gemini-cli 0.38.2's MCP resolver
+    **defaults to project scope** (`<cwd>/.gemini/settings.json`),
+    not user scope. An entry at `~/.gemini/settings.json` is
+    silently ignored by `gemini mcp list` and never reaches the
+    model — verified empirically by letting gemini write its own
+    MCP via `gemini mcp add` and observing it land in `<cwd>`.
+    GEMINI.md is still at user scope because its resolver DOES
+    merge hierarchically.
+  - New bind-mount: `<agent_home>/.gemini` → `/home/agent/.gemini`
+    (always mounted regardless of harness, so the user-scope
+    GEMINI.md and gemini's internal bookkeeping —
+    `installation_id`, `history/`, `tmp/` — survive container
+    restart). Project-scope `.gemini/` rides along inside the
+    existing `<workspace>:/workspace` mount.
+- **`DaemonConfig.google`** — new provider block (`api_key` +
+  `model`) alongside anthropic and openai. `puffoagent init`
+  prompts for a Google API key (env hint: `GEMINI_API_KEY` /
+  `GOOGLE_API_KEY`). Required when any agent uses
+  `harness=gemini-cli`; worker raises at adapter construction if
+  it's missing rather than failing silently mid-turn.
+- **Docker image bumped `v8` → `v9`** to pick up the gemini-cli
+  install.
+- **`cli-sandbox` runtime** declared as a reserved enum value. Load
+  surfaces a clean "not yet implemented" error — namespace reserved
+  for a future host-sandbox adapter (e.g. seatbelt / landlock).
+- **`Harness.supported_providers()`** — each harness class declares
+  its compatible providers so the matrix validator can reject
+  mismatched triples deterministically.
+- **`tests/test_runtime_matrix.py`** — 41 new tests covering every
+  documented combo (positive + negative), legacy migration, and
+  matrix invariants (e.g. every default harness-for-provider is a
+  valid triple).
+- **Collision-avoiding `_derive_agent_id` in `portal/sync.py`** —
+  when two server-side agents have the same ASCII slug (e.g.
+  `d2d2迷你` and `d2d2留声机` both → `d2d2`), the *oldest-created*
+  keeps the plain slug and later conflicts get a
+  `<base>-<user_id[:7]>` suffix. No migration needed: re-syncing
+  agents are identified by `mattermost.bot_token` and keep their
+  plain name regardless of which daemon version created them.
+  Remotes are sorted by `create_at` before derivation for
+  deterministic ordering across machines.
+- **`puffoagent agent list` DISPLAY column** — shows each agent's
+  display_name alongside the ID, readable at a glance even when
+  the ID is an opaque user-id suffix or hash-form.
+- **`tests/test_sync_id_collision.py`** — 14 new tests covering the
+  collision rules (oldest-wins, three-way conflict, re-sync
+  preservation, 64-char base truncation, stability across passes).
+
+### Fixed
+- **Gemini argv bug** — our turn preamble lines all begin with
+  `- ` (markdown list syntax), and `gemini -p <value>` was handing
+  yargs a separate argv that starts with `-`. yargs rejected with
+  "Not enough arguments following: p" and fell through to printing
+  its `Usage: gemini [options]` banner — which got leaked verbatim
+  into Mattermost as the agent's reply (rc=0, empty parser-valid
+  stdout). Fix: pass the prompt as a single argv token in
+  `--prompt=<value>` form. Extracted `_build_gemini_argv` as a pure
+  function so the invariant is testable; regression test locks
+  in dash-leading + multi-line CJK preamble values.
+- **Gemini MCP scope** — `sync_host_gemini_mcp_servers` now writes
+  to `<workspace>/.gemini/settings.json` (project scope). The
+  previous user-scope target was silently ignored by gemini's MCP
+  resolver, so the puffo tool surface (`get_channel_history`,
+  `send_message`, etc.) never reached the model.
+- **Gemini JSON parser** — `session_id` extraction was looking
+  inside `stats`; gemini 0.38.2 puts it at the top level. Error
+  field is a dict (`{"type", "message", "code"}`), not a string —
+  parser now unpacks `message` rather than stringifying the dict.
+  Added `Usage: gemini` banner detection: if upstream prints help
+  to stdout instead of JSON, return empty reply + clear error
+  rather than leaking the banner to the channel.
+- **Pre-exec log** for every gemini turn (argv with API key
+  redacted) so failed turns are reproducible from the daemon log
+  without reattaching the operator.
+
+### Changed
+- **`RuntimeConfig.kind` default** `chat-only` → `chat-local`.
+- **`build_adapter`** dispatches on the new kind names; the old
+  names never reach it (translated by `AgentConfig.load`).
+- **`puffoagent agent runtime`** display reorders the fields to
+  `kind / provider / harness / ...` matching the 3D framing.
+  `--kind` and `--provider` now use `choices=` so invalid values
+  are rejected at argparse time.
+- **`puffoagent init`** help text and `agent create --runtime`
+  default values updated to the new spellings.
+- **`puffo_tools.py` MCP server** accepts new runtime-kind / harness
+  values on its argv (`sdk-local`, `gemini-cli`) for parity.
+- **DESIGN.md** reorganized around the 3D matrix — new compatibility
+  table, validation section, and a "breaking changes in 0.7.0"
+  pointer in the historical rollout list.
+- **README.md** runtime-kinds table + YAML example updated to reflect
+  the new names and the new `provider:` field.
+- **`config.example.yml`** `default_provider` comment extended to
+  list `google` as a supported value.
+
+### Removed
+- Internal `_HARNESS_*` enum string literals duplicated across code —
+  now imported from `runtime_matrix`.
+
 ## [0.6.1] — 2026-04-22
 
 Triage sweep from a post-0.6.0 agent code review. Correctness + hygiene
@@ -189,6 +349,7 @@ agent context in the system prompt, eager spawn on daemon start.
 
 Initial public release. CI smoke tests + release workflow.
 
+[0.7.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.7.0
 [0.6.1]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.6.1
 [0.6.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.6.0
 [0.5.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.5.0

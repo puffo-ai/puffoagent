@@ -80,7 +80,7 @@ class TestThresholdGate:
         assert adapter.oneshot_calls == 1
 
     def test_none_from_hook_shortcircuits(self):
-        # SDK / chat-only adapters return None → no refresh.
+        # sdk-local / chat-local adapters return None → no refresh.
         adapter = _Fixture(expires_queue=[None])
         _run(adapter.refresh_ping())
         assert adapter.oneshot_calls == 0

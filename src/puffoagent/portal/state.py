@@ -257,6 +257,61 @@ _AGENT_INSTALLED_MARKER_BODY = (
 )
 
 
+def _sync_host_skills_dir(
+    src: Path, dst_root: Path, marker_body: str,
+) -> int:
+    """Generic skill-directory sync helper used by both the Claude
+    Code path (``sync_host_skills``) and the Gemini path
+    (``sync_host_gemini_skills``). Copies skill *directories* from
+    ``src`` into ``dst_root`` with the same semantics both harnesses
+    want: host is source of truth, agent-installed skills are
+    preserved on name collision, stale host-synced skills are pruned.
+
+    ``marker_body`` is the text written into the ``host-synced.md``
+    marker in each copied dir — callers pass a harness-specific
+    message so ``list_skills`` output is unambiguous.
+
+    Returns the number of skill directories copied (diagnostic only).
+    """
+    import shutil
+    host_names: set[str] = set()
+    if src.is_dir():
+        host_names = {p.name for p in src.iterdir() if p.is_dir()}
+
+    copied = 0
+    if host_names:
+        dst_root.mkdir(parents=True, exist_ok=True)
+        for name in sorted(host_names):
+            src_dir = src / name
+            dst_dir = dst_root / name
+            if (dst_dir / AGENT_INSTALLED_MARKER).exists():
+                continue
+            try:
+                if dst_dir.exists():
+                    shutil.rmtree(dst_dir)
+                shutil.copytree(src_dir, dst_dir)
+                (dst_dir / HOST_SYNCED_MARKER).write_text(
+                    marker_body, encoding="utf-8",
+                )
+                copied += 1
+            except OSError:
+                continue
+
+    if dst_root.is_dir():
+        for entry in dst_root.iterdir():
+            if not entry.is_dir() or entry.name in host_names:
+                continue
+            if (entry / HOST_SYNCED_MARKER).exists() and not (
+                entry / AGENT_INSTALLED_MARKER
+            ).exists():
+                try:
+                    shutil.rmtree(entry)
+                except OSError:
+                    pass
+
+    return copied
+
+
 def sync_host_skills(host_home: Path, agent_home: Path) -> int:
     """Copy every skill *directory* from the operator's real
     ``~/.claude/skills/`` into the per-agent virtual ``$HOME``'s
@@ -278,46 +333,45 @@ def sync_host_skills(host_home: Path, agent_home: Path) -> int:
 
     Returns the number of skill directories copied (diagnostic only).
     """
-    import shutil
-    src = host_home / ".claude" / "skills"
-    dst_root = agent_home / ".claude" / "skills"
+    return _sync_host_skills_dir(
+        src=host_home / ".claude" / "skills",
+        dst_root=agent_home / ".claude" / "skills",
+        marker_body=_HOST_SYNCED_MARKER_BODY,
+    )
 
-    host_names: set[str] = set()
-    if src.is_dir():
-        host_names = {p.name for p in src.iterdir() if p.is_dir()}
 
-    copied = 0
-    if host_names:
-        dst_root.mkdir(parents=True, exist_ok=True)
-        for name in sorted(host_names):
-            src_dir = src / name
-            dst_dir = dst_root / name
-            if (dst_dir / AGENT_INSTALLED_MARKER).exists():
-                continue
-            try:
-                if dst_dir.exists():
-                    shutil.rmtree(dst_dir)
-                shutil.copytree(src_dir, dst_dir)
-                (dst_dir / HOST_SYNCED_MARKER).write_text(
-                    _HOST_SYNCED_MARKER_BODY, encoding="utf-8",
-                )
-                copied += 1
-            except OSError:
-                continue
+_HOST_SYNCED_GEMINI_MARKER_BODY = (
+    "This skill is synced from the operator's ~/.gemini/skills/ on "
+    "every worker start. Do not edit; changes will be overwritten.\n"
+)
 
-    if dst_root.is_dir():
-        for entry in dst_root.iterdir():
-            if not entry.is_dir() or entry.name in host_names:
-                continue
-            if (entry / HOST_SYNCED_MARKER).exists() and not (
-                entry / AGENT_INSTALLED_MARKER
-            ).exists():
-                try:
-                    shutil.rmtree(entry)
-                except OSError:
-                    pass
 
-    return copied
+def sync_host_gemini_skills(host_home: Path, project_dir: Path) -> int:
+    """Copy every skill directory from the operator's real
+    ``~/.gemini/skills/`` into the per-agent **project-scope** gemini
+    skills dir at ``<project_dir>/.gemini/skills/``.
+
+    Project scope (not user scope) because Gemini CLI's MCP / skills
+    resolver defaults to project scope — ``gemini mcp list`` from
+    ``cwd=<project_dir>`` silently ignores a ``~/.gemini/settings.json``
+    entry, which masked our puffo MCP registration. Verified
+    empirically against gemini-cli 0.38.2. For puffoagent this means
+    ``<workspace>/.gemini/skills/`` since the cli-docker adapter
+    runs every turn with cwd=/workspace (the bind-mounted
+    workspace_dir).
+
+    Same provenance + pruning semantics as ``sync_host_skills``:
+    host-synced dirs get a ``host-synced.md`` marker, agent-
+    installed dirs are preserved on collision, stale host-synced
+    dirs are pruned when the host no longer ships them.
+
+    Returns the number of skill directories copied (diagnostic only).
+    """
+    return _sync_host_skills_dir(
+        src=host_home / ".gemini" / "skills",
+        dst_root=project_dir / ".gemini" / "skills",
+        marker_body=_HOST_SYNCED_GEMINI_MARKER_BODY,
+    )
 
 
 # Commands that reference these prefixes on the host won't resolve
@@ -409,6 +463,90 @@ def sync_host_mcp_servers(
     return len(host_servers), unreachable
 
 
+def sync_host_gemini_mcp_servers(
+    host_home: Path, project_dir: Path, *, extra_servers: dict | None = None,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Merge the operator's user-level Gemini MCP registrations from
+    ``~/.gemini/settings.json``'s ``mcpServers`` key into the per-
+    agent **project-scope** ``<project_dir>/.gemini/settings.json``
+    file.
+
+    Project scope (not user scope) because ``gemini mcp list`` —
+    and by extension gemini's runtime MCP resolver — defaults to
+    project scope. A puffo MCP entry written to
+    ``~/.gemini/settings.json`` inside the container was silently
+    ignored; the same entry at ``<cwd>/.gemini/settings.json`` is
+    picked up. Verified against gemini-cli 0.38.2 by running
+    ``gemini mcp add`` with no ``--scope`` flag and observing it
+    write to the cwd, not $HOME.
+
+    For puffoagent this means ``<workspace_dir>/.gemini/settings.json``
+    since the cli-docker adapter runs with cwd=/workspace (the
+    bind-mounted workspace_dir). The user-scope
+    ``<agent_home>/.gemini/`` directory still exists for GEMINI.md
+    and gemini's own bookkeeping (installation_id, history, tmp);
+    only the MCP registry moves.
+
+    Unlike the Claude Code path where MCP servers live in a
+    dedicated ``~/.claude.json``, Gemini keeps them inside
+    ``settings.json`` alongside every other CLI setting. We preserve
+    every other key on the per-agent settings.json, overwrite only
+    ``mcpServers``.
+
+    ``extra_servers`` lets the caller inject adapter-managed entries
+    (notably the puffo MCP stdio server) in the same write so the
+    file is consistent in one shot. Entries from ``extra_servers``
+    overwrite same-named host entries.
+
+    Returns ``(merged_count, unreachable)`` matching
+    ``sync_host_mcp_servers``. ``merged_count`` counts host entries
+    written (not extras).
+    """
+    host_path = host_home / ".gemini" / "settings.json"
+    host_servers: dict = {}
+    if host_path.exists():
+        try:
+            raw = host_path.read_text(encoding="utf-8")
+            if raw.strip():
+                host_servers = (json.loads(raw).get("mcpServers") or {})
+        except (OSError, ValueError):
+            host_servers = {}
+
+    agent_path = project_dir / ".gemini" / "settings.json"
+    agent_data: dict[str, Any] = {}
+    if agent_path.exists():
+        try:
+            raw = agent_path.read_text(encoding="utf-8")
+            if raw.strip():
+                agent_data = json.loads(raw)
+        except (OSError, ValueError):
+            agent_data = {}
+
+    merged_servers = dict(agent_data.get("mcpServers") or {})
+    unreachable: list[tuple[str, str]] = []
+    for name, cfg in host_servers.items():
+        merged_servers[name] = cfg
+        if isinstance(cfg, dict):
+            cmd = cfg.get("command") or ""
+            if isinstance(cmd, str) and _looks_host_local_command(cmd):
+                unreachable.append((name, cmd))
+
+    if extra_servers:
+        for name, cfg in extra_servers.items():
+            merged_servers[name] = cfg
+
+    agent_data["mcpServers"] = merged_servers
+
+    try:
+        agent_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = agent_path.with_suffix(agent_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(agent_data, indent=2), encoding="utf-8")
+        os.replace(tmp, agent_path)
+    except OSError:
+        return 0, []
+    return len(host_servers), unreachable
+
+
 def daemon_yml_path() -> Path:
     return home_dir() / "daemon.yml"
 
@@ -488,6 +626,10 @@ class DaemonConfig:
     default_provider: str = "anthropic"
     anthropic: ProviderConfig = field(default_factory=ProviderConfig)
     openai: ProviderConfig = field(default_factory=ProviderConfig)
+    # Google API key is required for ``cli-docker`` + ``harness=gemini-cli``
+    # agents (passed through as ``GEMINI_API_KEY`` to the containerised
+    # gemini CLI). Optional for installs that don't use gemini.
+    google: ProviderConfig = field(default_factory=ProviderConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     skills_dir: str = ""  # absolute path; empty means agents get no shared skills
     reconcile_interval_seconds: float = 2.0
@@ -509,7 +651,7 @@ class DaemonConfig:
             reconcile_interval_seconds=float(raw.get("reconcile_interval_seconds", 2.0)),
             runtime_heartbeat_seconds=float(raw.get("runtime_heartbeat_seconds", 5.0)),
         )
-        for name in ("anthropic", "openai"):
+        for name in ("anthropic", "openai", "google"):
             p = raw.get(name) or {}
             setattr(cfg, name, ProviderConfig(
                 api_key=p.get("api_key", ""),
@@ -535,6 +677,7 @@ class DaemonConfig:
             "runtime_heartbeat_seconds": self.runtime_heartbeat_seconds,
             "anthropic": asdict(self.anthropic),
             "openai": asdict(self.openai),
+            "google": asdict(self.google),
             "server": asdict(self.server),
         }
         _atomic_write_yaml(path, data)
@@ -557,14 +700,21 @@ class MattermostConfig:
 class RuntimeConfig:
     """Contents of the ``runtime:`` block in agent.yml.
 
-    ``kind`` selects which adapter handles this agent's turns. Empty
-    strings for ``provider`` / ``model`` / ``api_key`` mean "inherit
-    from daemon defaults". Kind-specific fields (docker image, tool
-    allowlists, permission timeouts) are added here as new adapters
-    land — see DESIGN.md.
+    Three orthogonal knobs drive adapter selection (see
+    ``portal/runtime_matrix.py`` for the full matrix):
+
+      - ``kind``     — WHERE the agent executes.
+      - ``provider`` — WHO serves the model.
+      - ``harness``  — WHAT agent engine runs inside the runtime
+                        (CLI kinds only).
+
+    Empty strings for ``provider`` / ``model`` / ``api_key`` mean
+    "inherit from daemon defaults". Kind-specific fields (docker
+    image, permission mode, max turns) are applied only when their
+    owning kind is active.
     """
-    kind: str = "chat-only"   # chat-only | sdk | cli-local | cli-docker
-    provider: str = ""        # chat-only: anthropic | openai
+    kind: str = "chat-local"      # chat-local | sdk-local | cli-local | cli-docker
+    provider: str = ""            # anthropic | openai | google (empty = default for kind)
     model: str = ""
     api_key: str = ""
     # Tool allowlist patterns (sdk | cli-local | cli-docker). Each entry
@@ -586,9 +736,9 @@ class RuntimeConfig:
     # our MCP tool suite (install_skill, refresh, etc.). ``hermes``
     # spawns `hermes chat -q` one-shot per turn against the Anthropic
     # API using Claude Code's credential store (auto-discovered from
-    # $HOME/.claude/.credentials.json). Only meaningful for kind
-    # ``cli-local`` / ``cli-docker``; ``sdk`` and ``chat-only`` ignore
-    # it.
+    # $HOME/.claude/.credentials.json). ``gemini-cli`` is declared
+    # but not yet implemented. Only meaningful for kind ``cli-local``
+    # / ``cli-docker``; ``sdk-local`` and ``chat-local`` ignore it.
     #
     # Heads-up on hermes + anthropic billing: per NousResearch issue
     # #12905, third-party OAuth clients route to Anthropic's
@@ -629,12 +779,35 @@ class AgentConfig:
 
     @classmethod
     def load(cls, agent_id: str) -> "AgentConfig":
+        from .runtime_matrix import migrate_legacy_kind, validate_triple
+
         path = agent_yml_path(agent_id)
         with path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         mm = raw.get("mattermost") or {}
         rt = raw.get("runtime") or {}
         triggers = raw.get("triggers") or {}
+
+        # Legacy kind names (chat-only, sdk) are accepted on load
+        # with a one-time WARNING so existing agent.yml files keep
+        # working. New spellings (chat-local, sdk-local) are written
+        # back on the next save().
+        kind = migrate_legacy_kind(
+            rt.get("kind", "chat-local"), agent_id=agent_id,
+        )
+        provider = rt.get("provider", "")
+        harness = rt.get("harness", "claude-code")
+
+        # Fail fast on invalid triples — e.g. harness=gemini-cli +
+        # provider=anthropic, or kind=cli-sandbox (reserved, not yet
+        # implemented). The error is raised as a RuntimeError the
+        # daemon's worker boot surfaces cleanly in the log.
+        result = validate_triple(kind, provider, harness)
+        if not result.ok:
+            raise RuntimeError(
+                f"agent {agent_id!r}: invalid runtime config — {result.error}"
+            )
+
         return cls(
             id=raw.get("id", agent_id),
             state=raw.get("state", "running"),
@@ -645,14 +818,14 @@ class AgentConfig:
                 team_name=mm.get("team_name", ""),
             ),
             runtime=RuntimeConfig(
-                kind=rt.get("kind", "chat-only"),
-                provider=rt.get("provider", ""),
+                kind=kind,
+                provider=provider,
                 model=rt.get("model", ""),
                 api_key=rt.get("api_key", ""),
                 allowed_tools=list(rt.get("allowed_tools") or []),
                 docker_image=rt.get("docker_image", ""),
                 permission_mode=rt.get("permission_mode", "default"),
-                harness=rt.get("harness", "claude-code"),
+                harness=harness,
                 max_turns=int(rt.get("max_turns", 10)),
             ),
             profile=raw.get("profile", "profile.md"),

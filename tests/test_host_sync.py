@@ -27,6 +27,8 @@ from puffoagent.portal.state import (
     AGENT_INSTALLED_MARKER,
     HOST_SYNCED_MARKER,
     _looks_host_local_command,
+    sync_host_gemini_mcp_servers,
+    sync_host_gemini_skills,
     sync_host_mcp_servers,
     sync_host_skills,
 )
@@ -455,3 +457,158 @@ def test_local_cli_verify_preserves_agent_installed_content(tmp_path, monkeypatc
     # Both MCPs present
     data = json.loads((agent_home / ".claude.json").read_text(encoding="utf-8"))
     assert set(data["mcpServers"].keys()) == {"agent-mcp", "host-mcp"}
+
+
+# ── Gemini-side host sync ────────────────────────────────────────────────────
+
+
+def test_sync_host_gemini_skills_copies_and_marks_for_provenance(tmp_path):
+    """Mirrors the claude-code skill-sync contract but for gemini:
+    read from ``~/.gemini/skills/``, write to
+    ``<agent_home>/.gemini/skills/``, drop a gemini-specific
+    host-synced marker so list / prune operations can tell
+    provenance at a glance.
+    """
+    host = tmp_path / "host"
+    host_skills = host / ".gemini" / "skills"
+    _write_skill(host_skills, "pdf-reader", body="A")
+    _write_skill(host_skills, "diagrammer", body="B")
+    agent = tmp_path / "agent"
+
+    n = sync_host_gemini_skills(host, agent)
+    assert n == 2
+    for name, body in (("pdf-reader", "A"), ("diagrammer", "B")):
+        dst = agent / ".gemini" / "skills" / name
+        assert (dst / "SKILL.md").read_text() == body
+        marker = dst / HOST_SYNCED_MARKER
+        assert marker.exists()
+        # Gemini marker body must reference .gemini/ so operators
+        # can distinguish it from a claude host-sync marker at a
+        # glance.
+        assert "~/.gemini/skills" in marker.read_text()
+
+
+def test_sync_host_gemini_skills_preserves_agent_installed(tmp_path):
+    """Agent-installed skills (marker present) must survive a host
+    sync even if the host has a same-named skill — per the shared
+    helper contract."""
+    host = tmp_path / "host"
+    _write_skill(host / ".gemini" / "skills", "mine", body="HOST")
+    agent = tmp_path / "agent"
+    made = agent / ".gemini" / "skills" / "mine"
+    made.mkdir(parents=True)
+    (made / "SKILL.md").write_text("AGENT", encoding="utf-8")
+    (made / AGENT_INSTALLED_MARKER).write_text("", encoding="utf-8")
+
+    sync_host_gemini_skills(host, agent)
+
+    assert (made / "SKILL.md").read_text() == "AGENT"
+    assert (made / AGENT_INSTALLED_MARKER).exists()
+
+
+def test_sync_host_gemini_skills_prunes_stale_host_synced(tmp_path):
+    """Host-synced dirs the host no longer has are pruned; agent-
+    installed dirs never are."""
+    host = tmp_path / "host"
+    _write_skill(host / ".gemini" / "skills", "fresh", body="F")
+    agent = tmp_path / "agent"
+    # Stale host-synced from a prior run
+    stale = agent / ".gemini" / "skills" / "gone"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("X", encoding="utf-8")
+    (stale / HOST_SYNCED_MARKER).write_text("", encoding="utf-8")
+    # Agent-installed that should survive
+    keep = agent / ".gemini" / "skills" / "mine"
+    keep.mkdir(parents=True)
+    (keep / "SKILL.md").write_text("A", encoding="utf-8")
+    (keep / AGENT_INSTALLED_MARKER).write_text("", encoding="utf-8")
+
+    sync_host_gemini_skills(host, agent)
+
+    assert not stale.exists()
+    assert (keep / "SKILL.md").read_text() == "A"
+    assert (agent / ".gemini" / "skills" / "fresh" / "SKILL.md").read_text() == "F"
+
+
+def test_sync_host_gemini_mcp_servers_merges_host_entries(tmp_path):
+    """Host ``~/.gemini/settings.json`` ``mcpServers`` get merged
+    into the per-agent settings.json; agent-only entries survive;
+    other top-level keys on settings.json are untouched."""
+    host = tmp_path / "host"
+    (host / ".gemini").mkdir(parents=True)
+    (host / ".gemini" / "settings.json").write_text(json.dumps({
+        "mcpServers": {"hmcp": {"command": "python3", "args": ["/srv/h.py"]}},
+        "theme": "dark",  # host setting we don't care about; may or may not exist
+    }), encoding="utf-8")
+    agent = tmp_path / "agent"
+    (agent / ".gemini").mkdir(parents=True)
+    (agent / ".gemini" / "settings.json").write_text(json.dumps({
+        "mcpServers": {"amcp": {"command": "node", "args": ["/srv/a.js"]}},
+        "context": {"fileName": ["GEMINI.md"]},
+    }), encoding="utf-8")
+
+    n, unreachable = sync_host_gemini_mcp_servers(host, agent)
+    assert n == 1
+    assert unreachable == []
+
+    agent_data = json.loads((agent / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+    assert set(agent_data["mcpServers"].keys()) == {"amcp", "hmcp"}
+    # Non-mcpServers keys on the per-agent settings are preserved.
+    assert agent_data.get("context") == {"fileName": ["GEMINI.md"]}
+
+
+def test_sync_host_gemini_mcp_servers_injects_extra_server_entry(tmp_path):
+    """The ``extra_servers`` parameter lets the adapter inject the
+    puffo MCP entry in the same write — avoids a race between host
+    sync and a separate CLI subprocess registration."""
+    host = tmp_path / "host"
+    (host / ".gemini").mkdir(parents=True)
+    (host / ".gemini" / "settings.json").write_text(json.dumps({
+        "mcpServers": {"hmcp": {"command": "python3"}},
+    }), encoding="utf-8")
+    agent = tmp_path / "agent"
+
+    puffo_entry = {
+        "command": "python3",
+        "args": ["/opt/puffoagent-mcp/puffo_tools.py"],
+        "env": {"PUFFO_AGENT_ID": "gbot"},
+    }
+    n, _ = sync_host_gemini_mcp_servers(
+        host, agent, extra_servers={"puffo": puffo_entry},
+    )
+    assert n == 1  # host count doesn't include extras
+
+    agent_data = json.loads((agent / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+    assert set(agent_data["mcpServers"].keys()) == {"hmcp", "puffo"}
+    assert agent_data["mcpServers"]["puffo"] == puffo_entry
+
+
+def test_sync_host_gemini_mcp_servers_missing_host_file_is_noop(tmp_path):
+    """No ``~/.gemini/settings.json`` on the host → no merge, but
+    ``extra_servers`` still writes through."""
+    host = tmp_path / "host"
+    agent = tmp_path / "agent"
+    n, _ = sync_host_gemini_mcp_servers(
+        host, agent, extra_servers={"puffo": {"command": "python3"}},
+    )
+    assert n == 0
+    agent_data = json.loads((agent / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+    assert list(agent_data["mcpServers"].keys()) == ["puffo"]
+
+
+def test_sync_host_gemini_mcp_servers_flags_host_local_commands(tmp_path):
+    """Same host-path heuristic as the claude-code path — absolute
+    paths that won't resolve inside the container get flagged."""
+    host = tmp_path / "host"
+    (host / ".gemini").mkdir(parents=True)
+    (host / ".gemini" / "settings.json").write_text(json.dumps({
+        "mcpServers": {
+            "local": {"command": "/Users/han/.local/bin/weird"},
+            "image": {"command": "python3"},
+        },
+    }), encoding="utf-8")
+    agent = tmp_path / "agent"
+
+    n, unreachable = sync_host_gemini_mcp_servers(host, agent)
+    assert n == 2
+    assert [name for name, _ in unreachable] == ["local"]

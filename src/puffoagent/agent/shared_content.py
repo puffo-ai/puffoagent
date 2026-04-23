@@ -670,6 +670,25 @@ def write_claude_md(claude_dir: Path, content: str) -> Path:
     return path
 
 
+def write_gemini_md(gemini_dir: Path, content: str) -> Path:
+    """Write ``content`` to ``<gemini_dir>/GEMINI.md``. Mirrors
+    ``write_claude_md`` — same assembled primer + profile + memory,
+    different filename and destination.
+
+    Gemini CLI auto-discovers ``GEMINI.md`` from the user-level
+    ``~/.gemini/GEMINI.md`` and from any workspace-level file in
+    cwd or ancestor dirs, concatenating hierarchically. Callers
+    should pass the USER-level gemini dir
+    (``agents/<id>/.gemini/``) so our managed content is layered
+    under the agent's own workspace-level ``GEMINI.md`` without
+    clobbering it.
+    """
+    gemini_dir.mkdir(parents=True, exist_ok=True)
+    path = gemini_dir / "GEMINI.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 # Marker: first line of the default shared primer. Used on worker
 # startup to detect a *previously-generated* managed CLAUDE.md at
 # the old project-level location, so we can remove it during the

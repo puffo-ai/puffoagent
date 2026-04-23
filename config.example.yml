@@ -10,9 +10,9 @@
 #   - The `server:` block is populated by `puffoagent login`.
 #   - Per-agent config goes through `puffoagent agent runtime ...`.
 
-# Which provider the chat-only runtime uses by default. Agents can
+# Which provider the chat-local runtime uses by default. Agents can
 # still override this in their own agent.yml via runtime.provider.
-default_provider: "anthropic"  # "anthropic" or "openai"
+default_provider: "anthropic"  # "anthropic" | "openai" | "google"
 
 anthropic:
   api_key: ""                    # https://console.anthropic.com/

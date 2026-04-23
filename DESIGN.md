@@ -4,16 +4,30 @@ This is the authoritative design note for the adapter rework. When the code and 
 
 ## Goal
 
-Let each agent choose its runtime independently. Same Mattermost-facing shell, four pluggable backends:
+Let each agent choose its runtime independently. Same Mattermost-facing shell, a three-dimensional type system per agent:
 
-| Kind | Where tools run | Auth | Permission model | Extra deps |
-|---|---|---|---|---|
-| `chat-only` | LLM API calls only (no tools) | `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (from `daemon.yml` or `agent.yml`) | N/A — no tool surface | None (stdlib) |
-| `sdk` | In-process (`claude-agent-sdk`) | `ANTHROPIC_API_KEY` (from `daemon.yml` or `agent.yml`) | Every tool call is routed through the `canUseTool` gate; `allowed_tools` pattern globs matched against tool input (`"Bash(git *)"`, `"Read(**/*.py)"`, etc.) | Python `claude-agent-sdk` package (optional extra) |
-| `cli-local` | Host machine (long-lived `claude` stream-json subprocess) | OAuth — user runs `claude login` once on the host; creds live at `~/.claude/.credentials.json` and the agent's copy is symlinked (or file-synced on Windows without Developer Mode) | `--permission-mode <mode>` + PreToolUse hook that DMs the Mattermost owner for each tool approval. Modes: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`. | `claude` binary on PATH |
-| `cli-docker` | Inside a per-agent Docker container (non-root `agent` user, UID 2000) | OAuth — host's `~/.claude/.credentials.json` is bind-mounted as a single-file overlay into `/home/agent/.claude/.credentials.json` so every agent + the host share one canonical token | `--dangerously-skip-permissions` (container is the sandbox) | Docker on host |
+1. **Runtime** (`kind`) — WHERE the agent executes. `chat-local` / `sdk-local` / `cli-local` / `cli-docker`; `cli-sandbox` is reserved for a future release and rejected at load.
+2. **Provider** — WHO serves the model. `anthropic` / `openai` / `google`.
+3. **Harness** — WHAT agent engine runs inside the runtime. Only meaningful for CLI runtimes; `chat-local` / `sdk-local` ignore the field. `claude-code` / `hermes` / `gemini-cli` (the last is reserved — not yet implemented).
 
-Orthogonal to `kind` is the **harness** field (new since the initial adapter rework): which agent engine runs *inside* the runtime. `claude-code` (default) spawns the `claude` CLI in stream-json mode on `cli-local`/`cli-docker`; `hermes` spawns `hermes chat -q --continue` one-shot per turn on `cli-docker` only. `chat-only`/`sdk` ignore the field.
+The full compatibility matrix (see `portal/runtime_matrix.py` for the single source of truth):
+
+| Runtime | Where tools run | Providers | Harness |
+|---|---|---|---|
+| `chat-local` | LLM API call only, no tools | `anthropic` / `openai` / `google` | N/A |
+| `sdk-local` | In-process (`claude-agent-sdk`; openai/google SDKs reserved) | `anthropic` *(shipped)* — `openai` / `google` reserved | N/A — the SDK IS the harness |
+| `cli-local` | Host subprocess (non-root, stream-json) | matches harness | `claude-code` (anthropic) · `hermes` (anthropic, openai) — `gemini-cli` rejected here, use cli-docker |
+| `cli-docker` | Per-agent Docker container (non-root `agent` user, UID 2000) | matches harness | `claude-code` (anthropic) · `hermes` (anthropic, openai) · `gemini-cli` (google) |
+| `cli-sandbox` | *reserved for a future release* | — | — |
+
+**Validation.** The (runtime, provider, harness) triple is validated at `AgentConfig.load()` and at `puffoagent agent runtime` setter time. Mismatches like `harness=claude-code` + `provider=google` get rejected with a clear error naming the conflicting fields. `cli-sandbox` is the one remaining reserved slot and returns a distinct "reserved — not yet implemented" message so operators know it's a roadmap item rather than a typo.
+
+**Legacy kind names** (`chat-only` → `chat-local`, `sdk` → `sdk-local`) are auto-migrated on load with a one-time WARNING. The shim stays in the 0.7.x line and is removed in 0.8.0.
+
+**Auth per harness:**
+- `claude-code` — OAuth tokens written by `claude login` on the host; shared across every agent via a bind-mounted / symlinked `.credentials.json`. No API key is injected by the adapter.
+- `hermes` — reads the Claude Code OAuth token off the same shared credentials file and passes it to hermes as `ANTHROPIC_API_KEY` on `docker exec`. No separate hermes login.
+- `gemini-cli` — static `GEMINI_API_KEY` from the daemon's `google.api_key` (set via `puffoagent init` or by editing `daemon.yml`). Passed to the container per turn as `docker exec -e GEMINI_API_KEY=...`. Google API keys don't rotate, so no refresh loop; if the key changes the operator edits `daemon.yml` and the next turn picks up the new value.
 
 ## Non-goals
 
@@ -119,13 +133,15 @@ triggers:
   on_dm: true
 
 runtime:
-  kind: chat-only | sdk | cli-local | cli-docker
+  kind: chat-local | sdk-local | cli-local | cli-docker
+
+  # which model provider to use (validated against harness for CLI kinds)
+  provider: anthropic          # anthropic | openai | google
 
   # which agent engine runs inside the runtime (cli-local / cli-docker only)
-  harness: claude-code         # or: hermes (cli-docker only)
+  harness: claude-code         # or: hermes | gemini-cli (reserved)
 
   # shared — applicable to every kind
-  provider: anthropic          # chat-only: anthropic | openai
   model: claude-sonnet-4-6
   api_key: ""                  # empty → inherit from daemon.yml
 
@@ -171,17 +187,17 @@ Each adapter maps these paths to its runtime's native conventions:
 - **LocalCLI**: subprocess spawned with `cwd=workspace_dir` → `claude` CLI discovers `.claude/` the same way.
 - **DockerCLI**: single bind-mount `workspace_dir` → `/workspace` in the container (with `/workspace` as WORKDIR). `.claude/` rides along because it's nested inside the mounted dir.
 
-Skills have an extra twist: the daemon also has a *shared* `skills_dir` in `daemon.yml` that applies to every agent. For the chat-only adapter the shell's `SkillsLoader` merges both dirs (daemon-wide first, per-agent second, per-agent wins on filename collision). The three tool-running adapters pick up only the per-agent `.claude/skills/` through native discovery; users who want agent-independent skills should put them there or symlink.
+Skills have an extra twist: the daemon also has a *shared* `skills_dir` in `daemon.yml` that applies to every agent. For the chat-local adapter the shell's `SkillsLoader` merges both dirs (daemon-wide first, per-agent second, per-agent wins on filename collision). The three tool-running adapters pick up only the per-agent `.claude/skills/` through native discovery; users who want agent-independent skills should put them there or symlink.
 
 ## Adapter details
 
-### Chat-only adapter (`chat-only`)
+### Chat-local adapter (`chat-local`)
 
-- No tool surface — plain chat completions against Anthropic or OpenAI.
-- Default kind for brand-new agents created via the webapp; operator flips it to `sdk`/`cli-local`/`cli-docker` via `puffoagent agent runtime --kind ...` when ready.
+- No tool surface — plain chat completions against Anthropic / OpenAI / Google.
+- Default kind for brand-new agents created via the webapp; operator flips it to `sdk-local`/`cli-local`/`cli-docker` via `puffoagent agent runtime --kind ...` when ready.
 - Used for low-ceremony bots that just need to reply in channels without filesystem/network access.
 
-### SDK adapter (`sdk`)
+### SDK-local adapter (`sdk-local`)
 
 - Depends on `claude-agent-sdk>=0.1.61` (declared in the `sdk` optional-extra of `pyproject.toml`).
 - Calls `query(prompt=..., options=ClaudeAgentOptions(system_prompt=ctx.system_prompt, cwd=workspace_dir, setting_sources=["project"], permission_mode=..., can_use_tool=self._gate, allowed_tools=[], max_turns=..., mcp_servers=...))`.
@@ -229,12 +245,13 @@ async def on_message(channel_id, ...):
 
 All four adapters + harness abstraction have shipped. Kept here for context on how the design landed:
 
-1. Shell refactor + `chat-only` adapter. (Promoted from migration seam to first-class — it remains the default kind for new agents.)
-2. SDK adapter with `canUseTool` gate + pattern-glob allowlist.
+1. Shell refactor + `chat-only` adapter. (Promoted from migration seam to first-class — it remains the default kind for new agents, renamed to `chat-local` in 0.7.0.)
+2. SDK adapter (`sdk`, renamed to `sdk-local` in 0.7.0) with `canUseTool` gate + pattern-glob allowlist.
 3. Docker CLI adapter.
 4. Local CLI adapter with PreToolUse hook permission proxy.
 5. Unified skills/memory translation across adapters.
 6. `Harness` abstraction — decouples the agent engine (claude-code / hermes) from the runtime kind.
+7. **v0.7.0**: provider promoted to first-class, runtime matrix + validator, `cli-sandbox` / `gemini-cli` reserved, kind names unified.
 
 ## Resolved questions
 
