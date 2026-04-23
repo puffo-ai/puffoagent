@@ -84,7 +84,15 @@ logger = logging.getLogger(__name__)
 # a rebuild without the user having to remember to prune the old
 # image tag. ``_ensure_image`` only builds when the tag is missing
 # locally, so a stable tag would mask Dockerfile edits.
-DEFAULT_IMAGE = "puffo/agent-runtime:v7"
+DEFAULT_IMAGE = "puffo/agent-runtime:v8"
+
+# Pinned version of the Claude Code CLI baked into the image.
+# Floating (``npm install -g @anthropic-ai/claude-code``) was bad
+# hygiene: each rebuild could pick up an upstream release that
+# shifts the stream-json protocol or the ``--permission-mode``
+# semantics under our feet. Bump this pin deliberately when a new
+# upstream release is verified against ``tests/``.
+CLAUDE_CODE_NPM_VERSION = "2.1.117"
 
 # Timeout for the refresh one-shot. A cold claude + OAuth refresh
 # round-trip + one-turn API call normally lands in 5-15s, but can
@@ -117,7 +125,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         python3 python3-pip \\
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code@__CLAUDE_CODE_VERSION__
 
 # Puffo MCP tools server dependencies. `--break-system-packages` is
 # required on Debian bookworm — PEP 668 marks /usr as externally
@@ -159,7 +167,7 @@ WORKDIR /workspace
 # them. Start from current EOF so we don't re-dump the full history
 # on every container restart.
 CMD ["sh", "-c", "set -eu; mkdir -p /workspace/.puffoagent; touch /workspace/.puffoagent/audit.log; echo \\"[$(date -u +%FT%TZ)] puffo agent=${PUFFO_AGENT_ID:-unknown} container starting; polling /workspace/.puffoagent/audit.log every 1s\\"; last=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); while :; do size=$(stat -c%s /workspace/.puffoagent/audit.log 2>/dev/null || echo 0); if [ \\"$size\\" -gt \\"$last\\" ]; then tail -c +$((last + 1)) /workspace/.puffoagent/audit.log; last=$size; elif [ \\"$size\\" -lt \\"$last\\" ]; then last=0; fi; sleep 1; done"]
-"""
+""".replace("__CLAUDE_CODE_VERSION__", CLAUDE_CODE_NPM_VERSION)
 
 
 class DockerCLIAdapter(Adapter):
@@ -834,7 +842,7 @@ class DockerCLIAdapter(Adapter):
         # without an image rebuild.
         export_mcp_script(self.mcp_script_dir)
 
-        # Five bind-mounts for every cli-docker agent:
+        # Six bind-mounts for every cli-docker agent:
         #   1. workspace        — per-agent project root + cwd.
         #   2. .claude dir      — per-agent claude identity (sessions,
         #                         history, settings, cache).

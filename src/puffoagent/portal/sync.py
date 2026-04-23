@@ -150,11 +150,12 @@ async def _sync_once(session: aiohttp.ClientSession, base_url: str) -> None:
 
 
 def _url_matches(a: str, b: str) -> bool:
-    """Trailing-slash + scheme-tolerant equality for server URLs.
+    """Trailing-slash + case-tolerant equality for server URLs.
 
     The daemon stores the URL as the user typed it; the server
-    config sometimes echoes it back with a trailing slash. We
-    normalise both before comparing.
+    config sometimes echoes it back with a trailing slash. Scheme
+    (``http`` vs ``https``) is treated as identity — a plaintext
+    endpoint is not the same server as its TLS counterpart.
     """
     return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
 

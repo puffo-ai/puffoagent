@@ -46,6 +46,7 @@ class SDKAdapter(Adapter):
         workspace_dir: str = "",
         team: str = "",
         owner_username: str = "",
+        max_turns: int = 10,
     ):
         try:
             from claude_agent_sdk import (
@@ -85,6 +86,7 @@ class SDKAdapter(Adapter):
         self.workspace_dir = workspace_dir
         self.team = team
         self.owner_username = owner_username
+        self.max_turns = max_turns
 
     async def run_turn(self, ctx: TurnContext) -> TurnResult:
         mcp_servers = {}
@@ -113,7 +115,7 @@ class SDKAdapter(Adapter):
             env={"ANTHROPIC_API_KEY": self.api_key} if self.api_key else {},
             mcp_servers=mcp_servers,
             setting_sources=["project"],  # pick up .claude/CLAUDE.md under cwd
-            max_turns=10,
+            max_turns=self.max_turns,
         )
 
         reply_parts: list[str] = []

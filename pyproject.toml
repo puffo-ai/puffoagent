@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puffoagent"
-version = "0.6.0"
+version = "0.6.1"
 description = "Run AI bots on Puffo.ai — local daemon that supervises many bot accounts and handles their LLM loops."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -30,6 +30,7 @@ dependencies = [
     "anthropic>=0.25",
     "mcp>=1.0",
     "openai>=1.30",
+    "psutil>=5.9",
     "pyyaml>=6.0",
 ]
 

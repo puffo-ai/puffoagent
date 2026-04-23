@@ -594,11 +594,39 @@ class LocalCLIAdapter(Adapter):
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
         Path(self.claude_dir).mkdir(parents=True, exist_ok=True)
 
-        logger.warning(
-            "agent %s: runtime kind 'cli-local' runs claude on the host with "
-            "--dangerously-skip-permissions. the agent has your filesystem + "
-            "network access with no approval prompts. switch to 'cli-docker' "
-            "for sandboxed execution.",
-            self.agent_id,
-        )
+        self._log_host_runtime_banner()
         self._verified = True
+
+    def _log_host_runtime_banner(self) -> None:
+        """One-time startup banner describing how this agent's
+        permission_mode shapes its host-level access. The tone
+        matches the actual risk: INFO when tool calls proxy to the
+        owner, WARNING when the mode auto-approves everything.
+        """
+        mode = self.permission_mode
+        if mode == "default":
+            logger.info(
+                "agent %s: cli-local runs on the host; all non-read tool "
+                "calls DM the Mattermost owner for approval via the "
+                "PreToolUse hook. switch to 'cli-docker' for sandboxed "
+                "execution if the owner can't be the gate.",
+                self.agent_id,
+            )
+            return
+        if mode == "acceptEdits":
+            logger.info(
+                "agent %s: cli-local (permission_mode=acceptEdits): file "
+                "edits auto-approve; shell + network still DM the "
+                "Mattermost owner via the PreToolUse hook. switch to "
+                "'cli-docker' for full sandboxed execution.",
+                self.agent_id,
+            )
+            return
+        # auto / dontAsk / bypassPermissions: no proxy hook, no prompts.
+        logger.warning(
+            "agent %s: cli-local (permission_mode=%s) auto-approves all "
+            "tool calls — the agent has your filesystem + network access "
+            "with no approval prompts. switch to 'cli-docker' for "
+            "sandboxed execution.",
+            self.agent_id, mode,
+        )

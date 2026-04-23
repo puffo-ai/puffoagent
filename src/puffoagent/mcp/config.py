@@ -32,6 +32,7 @@ PUFFO_TOOL_NAMES = (
     "fetch_channel_files",
     "get_post",
     "get_user_info",
+    "whoami",
     "reload_system_prompt",
     "install_skill",
     "uninstall_skill",

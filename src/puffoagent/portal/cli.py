@@ -1141,6 +1141,12 @@ def cmd_agent_runtime(args: argparse.Namespace) -> int:
     if args.harness is not None:
         cfg.runtime.harness = args.harness
         touched = True
+    if args.max_turns is not None:
+        if args.max_turns < 1:
+            print("error: --max-turns must be >= 1", file=sys.stderr)
+            return 2
+        cfg.runtime.max_turns = args.max_turns
+        touched = True
 
     if not touched:
         # No flags → just print. Matches `agent show`'s runtime lines.
@@ -1154,6 +1160,7 @@ def cmd_agent_runtime(args: argparse.Namespace) -> int:
         print(f"  allowed_tools:    {cfg.runtime.allowed_tools or '[]'}")
         print(f"  docker_image:     {cfg.runtime.docker_image or '(bundled default)'}")
         print(f"  permission_mode:  {cfg.runtime.permission_mode}  (cli-local only)")
+        print(f"  max_turns:        {cfg.runtime.max_turns}  (sdk only)")
         return 0
 
     cfg.save()
@@ -1355,6 +1362,15 @@ def build_parser() -> argparse.ArgumentParser:
             "cli-local: Claude Code permission mode. 'default' routes all "
             "non-read tools through the MCP permission proxy (recommended). "
             "See https://code.claude.com/docs/en/permission-modes."
+        ),
+    )
+    runtime.add_argument(
+        "--max-turns",
+        type=int,
+        help=(
+            "sdk only: max agentic-loop iterations per conversation "
+            "turn (tool calls + final reply). Default 10; raise for "
+            "complex multi-step tasks."
         ),
     )
     runtime.add_argument(

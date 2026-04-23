@@ -204,7 +204,7 @@ Two operator-side knobs that complement the modes:
 
 Same CLI as `cli-local`, but inside its own sandboxed container. The container is the isolation boundary; `--dangerously-skip-permissions` is safe *inside* the container because the agent can't escape back to your host for file access.
 
-- **How:** on first use puffoagent builds `puffo/agent-runtime:v7` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
+- **How:** on first use puffoagent builds `puffo/agent-runtime:v8` from an inline Dockerfile (~2 min, one-time — subsequent agents reuse the image). Then for each agent:
   - One long-lived container, `puffo-<agent-id>`, runs as a non-root `agent` user.
   - The per-agent workspace (`~/.puffoagent/agents/<id>/workspace/`) is bind-mounted to `/workspace`.
   - The per-agent `.claude/` (`~/.puffoagent/agents/<id>/.claude/`) is bind-mounted to `/home/agent/.claude` — isolated sessions, history, and settings per agent.
@@ -233,7 +233,7 @@ Runtime decides *where* the agent executes (host subprocess / docker container /
 puffoagent agent runtime <agent-id> --harness hermes
 ```
 
-On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v7` with `hermes-agent` pre-installed) and invokes `hermes chat --provider anthropic --quiet -q <msg>` inside the container. Hermes auto-discovers Claude Code's credential store from `~/.claude/.credentials.json` (already bind-mounted) — zero config needed. Subsequent turns add `--continue` so hermes resumes its session from `~/.hermes/state.db`.
+On first turn the daemon rebuilds the docker image (now `puffo/agent-runtime:v8` with `hermes-agent` pre-installed) and invokes `hermes chat --provider anthropic --quiet -q <msg>` inside the container. Hermes auto-discovers Claude Code's credential store from `~/.claude/.credentials.json` (already bind-mounted) — zero config needed. Subsequent turns add `--continue` so hermes resumes its session from `~/.hermes/state.db`.
 
 **Caveat worth eyes:** Anthropic routes third-party OAuth clients (that's hermes) to its `extra_usage` billing pool, NOT your Claude subscription — same token, different ledger. See [NousResearch/hermes-agent#12905](https://github.com/NousResearch/hermes-agent/issues/12905).
 

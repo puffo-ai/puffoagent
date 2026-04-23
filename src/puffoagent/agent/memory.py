@@ -1,6 +1,6 @@
 import os
 import glob
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MemoryManager:
@@ -30,5 +30,9 @@ class MemoryManager:
         self.memories[topic] = content
         safe_topic = topic.replace(" ", "_").replace("/", "-")
         path = os.path.join(self.memory_dir, f"{safe_topic}.md")
+        # ``datetime.utcnow()`` is deprecated in 3.12+; aware-UTC
+        # is the modern spelling. Render with a ``Z`` suffix so the
+        # frontmatter stays human-friendly instead of ``+00:00``.
+        updated = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"---\ntopic: {topic}\nupdated: {datetime.utcnow().isoformat()}\n---\n\n{content}\n")
+            f.write(f"---\ntopic: {topic}\nupdated: {updated}\n---\n\n{content}\n")

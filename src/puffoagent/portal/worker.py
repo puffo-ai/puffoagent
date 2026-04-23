@@ -87,6 +87,7 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             mattermost_token=agent_cfg.mattermost.bot_token,
             workspace_dir=str(agent_cfg.resolve_workspace_dir()),
             team=agent_cfg.mattermost.team_name,
+            max_turns=agent_cfg.runtime.max_turns,
         )
 
     # The claude CLI adapters authenticate via OAuth credentials the

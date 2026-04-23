@@ -115,15 +115,17 @@ def test_reply_mentioning_silent_in_quotes_is_suppressed(tmp_path):
 # ── (2) _resolve_mentions marks self with is_self: true ──────────────────────
 #
 # Mocks a tiny aiohttp-shaped session so we don't need a live server.
-# Only the two methods ``_resolve_mentions`` actually touches need
-# stubbing: ``session.get(url)`` as an async context manager, whose
-# ``__aenter__`` returns a response with ``status`` + async ``.json()``.
+# ``_resolve_mentions`` posts the full username list to the batch
+# endpoint ``/api/v4/users/usernames`` and expects a JSON array of
+# user records back. The fake below takes a ``users`` registry
+# (username → record) and filters to the requested subset, silently
+# omitting unknowns (matches server semantics).
 
 
 class _FakeResp:
-    def __init__(self, status: int, payload: dict | None = None):
+    def __init__(self, status: int, payload=None):
         self.status = status
-        self._payload = payload or {}
+        self._payload = payload if payload is not None else {}
 
     async def __aenter__(self):
         return self
@@ -136,18 +138,22 @@ class _FakeResp:
 
 
 class _FakeSession:
-    """Maps username → server response. ``get(url)`` parses the
-    username off the path and returns the canned response. A missing
-    username yields a 404 so the resolver drops it silently."""
+    """Maps username → server record. ``post(url, json=[names])``
+    returns the subset of registered users matching those names.
+    Also counts calls so tests can assert the batch (1 call for
+    any number of mentions) invariant.
+    """
 
     def __init__(self, users: dict[str, dict]):
         self._users = users
+        self.post_calls: list[list[str]] = []
 
-    def get(self, url: str) -> _FakeResp:  # noqa: D401 — mimic aiohttp
-        name = url.rsplit("/", 1)[-1]
-        if name not in self._users:
-            return _FakeResp(status=404)
-        return _FakeResp(status=200, payload=self._users[name])
+    def post(self, url: str, *, json: list[str]) -> _FakeResp:
+        self.post_calls.append(list(json))
+        if not url.endswith("/api/v4/users/usernames"):
+            return _FakeResp(status=404, payload=[])
+        matched = [self._users[n] for n in json if n in self._users]
+        return _FakeResp(status=200, payload=matched)
 
 
 def _client_with_bot(username: str) -> MattermostClient:
@@ -215,6 +221,71 @@ def test_resolve_mentions_dedupes_repeated_self():
     ))
     assert len(resolved) == 1
     assert resolved[0]["is_self"] is True
+    # Batch endpoint is called at most once even with duplicates.
+    assert len(session.post_calls) == 1
+    assert session.post_calls[0] == ["agent1"]
+
+
+def test_resolve_mentions_single_batch_call_for_many_mentions():
+    """Regression guard: N @-mentions used to fan out into N GETs.
+    The batch endpoint collapses them to one POST with the full
+    deduped list, preserving order of first appearance."""
+    client = _client_with_bot("agent1")
+    session = _FakeSession({
+        "agent1": {"username": "agent1", "is_bot": True},
+        "alice":  {"username": "alice",  "is_bot": False},
+        "bob":    {"username": "bob",    "is_bot": False},
+        "carol":  {"username": "carol",  "is_bot": False},
+    })
+    resolved = _run(client._resolve_mentions(
+        session, "@alice @bob @carol @agent1 heads up",
+    ))
+    assert [m["username"] for m in resolved] == ["alice", "bob", "carol", "agent1"]
+    assert len(session.post_calls) == 1
+    assert session.post_calls[0] == ["alice", "bob", "carol", "agent1"]
+
+
+def test_resolve_mentions_drops_unknown_usernames():
+    """Unknown names (not valid users) are silently omitted — the
+    batch endpoint just returns the subset it found."""
+    client = _client_with_bot("agent1")
+    session = _FakeSession({
+        "alice": {"username": "alice", "is_bot": False},
+    })
+    resolved = _run(client._resolve_mentions(
+        session, "@alice @bogus @other",
+    ))
+    assert [m["username"] for m in resolved] == ["alice"]
+
+
+def test_resolve_mentions_no_mentions_skips_network():
+    """Message with no @-mentions should do zero HTTP calls — no
+    point paying latency for an empty batch."""
+    client = _client_with_bot("agent1")
+    session = _FakeSession({})
+    resolved = _run(client._resolve_mentions(session, "just a plain message"))
+    assert resolved == []
+    assert session.post_calls == []
+
+
+def test_resolve_mentions_batch_failure_returns_empty():
+    """If the batch endpoint itself fails, we can't partially
+    recover — return empty (old per-name loop would have failed on
+    every lookup anyway under a comparable network failure)."""
+
+    class _FailingSession:
+        def __init__(self):
+            self.post_calls: list[list[str]] = []
+
+        def post(self, url, *, json):
+            self.post_calls.append(list(json))
+            raise RuntimeError("simulated network failure")
+
+    client = _client_with_bot("agent1")
+    session = _FailingSession()
+    resolved = _run(client._resolve_mentions(session, "@alice @bob"))
+    assert resolved == []
+    assert len(session.post_calls) == 1  # We tried once, not once-per-name.
 
 
 # ── (3) _append_user preamble renders " — that's you" for self ──────────────

@@ -2,11 +2,11 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 import aiohttp
 
 from ._logging import agent_logger
+from ._time import ms_to_iso as _ms_to_iso
 
 
 _MENTION_RE = re.compile(r"@([a-zA-Z0-9._-]+)")
@@ -56,21 +56,6 @@ def _compute_priority(direct: bool, sender_is_bot: bool, is_system: bool) -> int
 # explode the user message. Most useful info is the *latest* posts,
 # so when the count exceeds this, we keep the most recent N.
 FOLLOWUP_CONTEXT_LIMIT = 20
-
-
-def _ms_to_iso(ms: int) -> str:
-    """Mattermost timestamps are ms-since-epoch ints. Render as ISO
-    8601 in UTC for the agent's user message — both unambiguous and
-    sortable by the model.
-    """
-    if not ms:
-        return ""
-    try:
-        return datetime.fromtimestamp(
-            ms / 1000, tz=timezone.utc,
-        ).isoformat(timespec="seconds")
-    except (ValueError, OSError):
-        return ""
 
 
 class MattermostClient:
@@ -437,9 +422,10 @@ class MattermostClient:
     async def _resolve_mentions(
         self, session: aiohttp.ClientSession, text: str,
     ) -> list[dict]:
-        """Parse ``@name`` mentions from ``text`` and look each up on
-        the server so the agent sees who's human vs. bot. Duplicates
-        are deduped; unknown names (not valid users) are dropped.
+        """Parse ``@name`` mentions from ``text`` and look them up in
+        a single batch call so the agent sees who's human vs. bot.
+        Duplicates are deduped; unknown names (not valid users) are
+        dropped.
 
         The bot's own username is included and flagged with
         ``is_self: true``. Paired with the ``@you(<name>)`` rewrite
@@ -449,27 +435,44 @@ class MattermostClient:
         Returns a list of ``{"username": str, "is_bot": bool,
         "is_self": bool}`` in order of first appearance.
         """
-        resolved: list[dict] = []
+        names: list[str] = []
         seen: set[str] = set()
         for m in _MENTION_RE.finditer(text or ""):
             name = m.group(1)
             if name in seen:
                 continue
             seen.add(name)
-            is_self = name == self.bot_username
-            try:
-                async with session.get(
-                    f"{self.url}/api/v4/users/username/{name}",
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    user = await resp.json()
-            except Exception:
+            names.append(name)
+        if not names:
+            return []
+
+        # POST /api/v4/users/usernames takes a JSON array of usernames
+        # and returns the matching user records in one round-trip.
+        # Unknown names are silently omitted from the response (not
+        # an error), which matches our per-name fallback behaviour.
+        try:
+            async with session.post(
+                f"{self.url}/api/v4/users/usernames",
+                json=names,
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                users = await resp.json()
+        except Exception:
+            return []
+
+        by_username: dict[str, dict] = {
+            u.get("username"): u for u in users if u.get("username")
+        }
+        resolved: list[dict] = []
+        for name in names:
+            user = by_username.get(name)
+            if user is None:
                 continue
             resolved.append({
                 "username": user.get("username", name),
                 "is_bot": bool(user.get("is_bot", False)),
-                "is_self": is_self,
+                "is_self": name == self.bot_username,
             })
         return resolved
 

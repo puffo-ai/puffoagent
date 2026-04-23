@@ -4,6 +4,69 @@ All notable changes to `puffoagent` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-04-22
+
+Triage sweep from a post-0.6.0 agent code review. Correctness + hygiene
+fixes, no breaking changes.
+
+### Added
+- **`runtime.max_turns`** field on `RuntimeConfig` with matching
+  `puffoagent agent runtime --max-turns N` CLI flag. Caps the SDK
+  adapter's agentic-loop iterations per conversation turn; previously
+  hard-coded at 10. Default stays 10; only wired into the SDK adapter
+  (CLI adapters delegate turn-bounding to the `claude` CLI).
+- **`whoami`** is now in `PUFFO_TOOL_NAMES` so SDK-runtime agents get
+  it in the auto-allowlist. The tool was always registered with
+  `@mcp.tool()` but missing from the allowlist — CLI runtimes masked
+  the omission because they run under `--dangerously-skip-permissions`.
+
+### Fixed
+- **`is_daemon_alive()` PID-reuse false positive.** Previously a raw
+  `os.kill(pid, 0)` liveness check — after a reboot the same numeric
+  PID could belong to any unrelated process, blocking a new daemon
+  start. Now uses `psutil.Process(pid).cmdline()` to verify the
+  process is actually `puffoagent ... start`. Matches four invocation
+  shapes (bare, venv shim, `.exe`, `python -m`).
+- **`_resolve_mentions` N+1 → batch.** `N` @-mentions in a message
+  used to fan out into `N` individual `GET /users/username/<name>`
+  requests. Now one `POST /users/usernames` with the full deduped
+  list. Also skips the round-trip entirely when a message has no
+  mentions.
+- **cli-local startup banner** is now mode-aware. Under `default` /
+  `acceptEdits` it logs INFO describing the permission proxy; only
+  under `auto` / `dontAsk` / `bypassPermissions` does it keep the
+  loud WARNING about unsandboxed host access. Previously every
+  cli-local agent got the scary message regardless of whether the
+  permission proxy was active.
+- **Pinned claude-code CLI** in the `cli-docker` Dockerfile to
+  `@anthropic-ai/claude-code@2.1.117`. Floating was a reproducibility
+  hazard — each rebuild could pick up a stream-json or
+  `--permission-mode` shift under us. Image bumped `v7` → `v8`.
+- **`datetime.utcnow()`** replaced with `datetime.now(timezone.utc)`
+  in `memory.py` (deprecated since Python 3.12). Memory-frontmatter
+  timestamps now render with a clean `Z` suffix.
+- **`_url_matches` docstring** no longer claims "scheme-tolerant"
+  equality — the implementation lower-cases and strips trailing
+  slashes only, and scheme is a real identity signal we shouldn't
+  collapse.
+- **`requirements.txt`** resynced with `pyproject.toml`: `mcp>=1.0`
+  and `psutil>=5.9` added, files now track the same dependency list
+  verbatim (in the same alphabetical order so diffs stay boring).
+
+### Changed
+- **Dependencies:** added `psutil>=5.9` to the runtime deps for the
+  PID-identity check above.
+- **Docstring / comment cleanups** across the repo: stale "previously
+  we did X" framing dropped in favor of forward-looking wording;
+  `docker_cli.py` bind-mount count corrected (five → six); `DESIGN.md`
+  adapter table now lists all four kinds and reflects the shipped
+  permission proxy + harness abstraction; `config.example.yml`
+  rewritten from the legacy single-agent flat shape to the current
+  `DaemonConfig` schema.
+- **`_ms_to_iso`** deduplicated — extracted into
+  `puffoagent/agent/_time.py` and imported by both `core.py` and
+  `mattermost_client.py`.
+
 ## [0.6.0] — 2026-04-22
 
 Hermes becomes a first-class harness on `cli-docker`, plus two
@@ -126,6 +189,7 @@ agent context in the system prompt, eager spawn on daemon start.
 
 Initial public release. CI smoke tests + release workflow.
 
+[0.6.1]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.6.1
 [0.6.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.6.0
 [0.5.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.5.0
 [0.4.0]: https://github.com/puffo-ai/puffoagent/releases/tag/v0.4.0

@@ -1,25 +1,47 @@
-mattermost:
-  url: "http://localhost:8065"
-  bot_token: ""         # Bot account token from Mattermost > Integrations > Bot Accounts
-  team_name: "puffo"
-  channels:
-    - "town-square"
-    - "off-topic"
+# Example ~/.puffoagent/daemon.yml
+#
+# This is the daemon-wide config. Each agent has its own
+# ~/.puffoagent/agents/<agent-id>/agent.yml that covers
+# Mattermost connection, runtime kind, triggers, etc. — don't
+# duplicate those here.
+#
+# Most users don't need to hand-edit this file:
+#   - LLM API keys are set via `puffoagent init`.
+#   - The `server:` block is populated by `puffoagent login`.
+#   - Per-agent config goes through `puffoagent agent runtime ...`.
 
-ai:
-  default_provider: "anthropic"  # "anthropic" or "openai"
-  anthropic:
-    api_key: ""         # https://console.anthropic.com/
-    model: "claude-sonnet-4-6"
-  openai:
-    api_key: ""         # https://platform.openai.com/
-    model: "gpt-4o"
+# Which provider the chat-only runtime uses by default. Agents can
+# still override this in their own agent.yml via runtime.provider.
+default_provider: "anthropic"  # "anthropic" or "openai"
 
-api_port: 8066  # Port for the agent REST API (profile + usage endpoints)
+anthropic:
+  api_key: ""                    # https://console.anthropic.com/
+  model:   "claude-sonnet-4-6"   # empty = provider default
 
-agent:
-  profile: "agents/default.md"
-  memory_dir: "memory/"
-  skills_dir: "skills/"
-  trigger_on_mention: true
-  trigger_on_dm: true
+openai:
+  api_key: ""                    # https://platform.openai.com/
+  model:   "gpt-4o"
+
+# Populated by `puffoagent login`. The daemon uses this to pull the
+# operator's agents list from the Puffo.ai server on every sync tick
+# and mirror it into ~/.puffoagent/agents/.
+#
+# user_token / device_id / operator_username are all written by
+# login — editing by hand is only useful for scripted installs.
+server:
+  url:                     ""    # e.g. https://app.puffo.ai
+  user_token:              ""    # PAT or device-pairing token
+  device_id:               ""    # set by `puffoagent login` (device flow)
+  operator_username:       ""    # set by `puffoagent login` (GET /users/me)
+  sync_interval_seconds:   30.0
+
+# Optional: absolute path to a directory of shared Claude Code
+# skills (*.md files or skill dirs) synced into every cli-local /
+# cli-docker agent on worker start. Leave empty to skip.
+skills_dir: ""
+
+# Reconciler tick intervals. Lower = more responsive to agent.yml
+# edits but more filesystem polling; defaults are fine for ~10s of
+# agents.
+reconcile_interval_seconds: 2.0
+runtime_heartbeat_seconds:  5.0

@@ -1,26 +1,11 @@
 import os
-from datetime import datetime, timezone
 
 from ._logging import agent_logger
+from ._time import ms_to_iso as _ms_to_iso
 from .adapters import Adapter, TurnContext
 from .memory import MemoryManager
 
 MAX_LOG_ENTRIES = 60
-
-
-def _ms_to_iso(ms: int) -> str:
-    """Render a Mattermost ms-since-epoch timestamp as ISO 8601 in
-    UTC. Empty string when ms is 0/missing — the caller drops the
-    field rather than emitting an empty timestamp.
-    """
-    if not ms:
-        return ""
-    try:
-        return datetime.fromtimestamp(
-            ms / 1000, tz=timezone.utc,
-        ).isoformat(timespec="seconds")
-    except (ValueError, OSError):
-        return ""
 
 
 class PuffoAgent:

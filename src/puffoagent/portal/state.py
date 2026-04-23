@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+import psutil
 import yaml
 
 
@@ -594,6 +595,13 @@ class RuntimeConfig:
     # ``extra_usage`` pool, NOT your Claude subscription. Same token,
     # different ledger. Confirm cost expectations before production use.
     harness: str = "claude-code"  # claude-code | hermes
+    # sdk only: cap on agentic-loop iterations within a single
+    # conversation turn. Each iteration is a tool-call → result pair
+    # (or a final reply). 10 is fine for short Q&A or simple tool
+    # use; complex multi-step work (read a codebase, write a patch)
+    # often needs 30-50. Ignored by the other runtime kinds — CLI
+    # adapters delegate turn-bounding to the claude CLI itself.
+    max_turns: int = 10
 
 
 @dataclass
@@ -645,6 +653,7 @@ class AgentConfig:
                 docker_image=rt.get("docker_image", ""),
                 permission_mode=rt.get("permission_mode", "default"),
                 harness=rt.get("harness", "claude-code"),
+                max_turns=int(rt.get("max_turns", 10)),
             ),
             profile=raw.get("profile", "profile.md"),
             memory_dir=raw.get("memory_dir", "memory"),
@@ -782,30 +791,31 @@ def read_daemon_pid() -> int | None:
 
 
 def is_daemon_alive() -> bool:
+    """True iff the pid recorded in ``daemon.pid`` is live AND the
+    process is this package's daemon (``puffoagent start``).
+
+    The cmdline check guards against PID reuse after a crash or
+    reboot: the same numeric pid can belong to any unrelated process
+    once the OS rolls around its pid table, and a bare liveness check
+    would then falsely report "daemon running" and block a legitimate
+    start. We match the executable (stem = ``puffoagent``) AND the
+    ``start`` subcommand so concurrent CLI invocations like
+    ``puffoagent agent list`` don't count as the daemon.
+    """
     pid = read_daemon_pid()
     if pid is None:
         return False
-    if os.name == "nt":
-        # On Windows, os.kill(pid, 0) is not a reliable presence check —
-        # it raises WinError 87 even for live processes. Use
-        # OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) instead.
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            return True
-        finally:
-            kernel32.CloseHandle(handle)
     try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
+        proc = psutil.Process(pid)
+        tokens = [t or "" for t in proc.cmdline()]
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
-    except OSError:
-        return False
+    # Covers direct invocation (``puffoagent start``), script-shim
+    # invocation (``/.venv/bin/puffoagent start``), Windows
+    # (``puffoagent.exe start``), and ``python -m puffoagent start``.
+    has_exe = any(Path(t).stem.lower() == "puffoagent" for t in tokens)
+    has_start = any(t.lower() == "start" for t in tokens)
+    return has_exe and has_start
 
 
 def write_daemon_pid(pid: int) -> None:
