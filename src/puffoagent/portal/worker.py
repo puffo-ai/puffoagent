@@ -220,12 +220,29 @@ class Worker:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._adapter: Adapter | None = None
+        # Set the moment ``adapter.warm()`` finishes (success OR
+        # failure) so the daemon can await heavy startup before
+        # kicking off the next worker. Also set on early-exit
+        # paths (build_adapter failure) so a fatal init never
+        # leaves the reconcile loop hanging on this event.
+        self._warm_done = asyncio.Event()
 
     def start(self) -> asyncio.Task:
         if self._task is not None and not self._task.done():
             return self._task
         self._task = asyncio.ensure_future(self._run())
         return self._task
+
+    async def wait_warm(self, timeout: float | None = None) -> bool:
+        """Block until ``adapter.warm()`` has run (or the worker
+        exited before reaching it). Returns True on completion,
+        False on timeout. Used by the daemon to serialise heavy
+        startup across many agents."""
+        try:
+            await asyncio.wait_for(self._warm_done.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def stop(self) -> None:
         self._stop.set()
@@ -369,6 +386,9 @@ class Worker:
             self.runtime.status = "error"
             self.runtime.error = str(e)
             self.runtime.save(agent_id)
+            # Init crashed before warm() — release the daemon's
+            # serialise-startup gate so the next worker can proceed.
+            self._warm_done.set()
             return
 
         # Warm the adapter so agents with a persisted session re-spawn
@@ -382,6 +402,10 @@ class Worker:
                 "agent %s: warm() failed (will retry on first turn): %s",
                 agent_id, exc,
             )
+        finally:
+            # Whether warm succeeded or fell through, the heavy lift
+            # is done; the daemon can move on to the next worker.
+            self._warm_done.set()
 
         reload_flag_path = Path(workspace_path) / ".puffoagent" / "reload.flag"
         refresh_flag_path = Path(workspace_path) / ".puffoagent" / "refresh.flag"

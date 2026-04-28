@@ -477,7 +477,17 @@ class LocalCLIAdapter(Adapter):
         tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         tmp.replace(settings_path)
 
-    def _build_command(self, extra_args: list[str]) -> list[str]:
+    def _build_command(
+        self,
+        extra_args: list[str],
+        env_overrides: dict[str, str] | None = None,
+    ) -> list[str]:
+        # ``env_overrides`` is honoured by merging into the subprocess
+        # env on the host (see ClaudeSession._spawn). Local claude
+        # inherits process env directly, so we don't need to thread
+        # the values onto argv — the kwarg is just there for symmetry
+        # with the docker adapter.
+        del env_overrides  # unused — see comment above
         # We pass ``--permission-mode`` rather than
         # ``--dangerously-skip-permissions`` so the user controls
         # which tool categories auto-approve. Anything claude would

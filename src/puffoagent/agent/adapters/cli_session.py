@@ -175,19 +175,23 @@ class ClaudeSession:
         self,
         agent_id: str,
         session_file: Path,
-        build_command: Callable[[list[str]], list[str]],
+        build_command: Callable[[list[str], dict[str, str]], list[str]],
         cwd: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
         audit: Optional["AuditLog"] = None,
         extra_args: Optional[list[str]] = None,
     ):
         """
-        ``build_command(extra_args)`` is called with a list of extra
-        claude flags (e.g. ``["--resume", "abc"]``) and must return
-        the full argv list to spawn. For cli-local this prepends
-        ``["claude", "--dangerously-skip-permissions", ...]``; for
-        cli-docker it prepends ``["docker", "exec", "-i", name,
-        "claude", "--dangerously-skip-permissions", ...]``.
+        ``build_command(extra_args, env_overrides)`` is called with a
+        list of extra claude flags (e.g. ``["--resume", "abc"]``) plus
+        a dict of env vars the *containerised* claude must see, and
+        must return the full argv list to spawn. For cli-local this
+        prepends ``["claude", "--dangerously-skip-permissions", ...]``
+        and ignores ``env_overrides`` (they're already merged into the
+        subprocess env on the host). For cli-docker it prepends
+        ``["docker", "exec", "-i", ...]`` plus ``-e KEY=VALUE`` for
+        each entry of ``env_overrides`` so the in-container process
+        actually sees them.
 
         ``audit`` is optional. When provided, each turn appends
         structured events for operators to tail.
@@ -370,7 +374,23 @@ class ClaudeSession:
         if self._session_id:
             args.extend(["--resume", self._session_id])
 
-        cmd = self.build_command(args)
+        # Resuming reads the entire transcript into Node's heap; long
+        # sessions trip the default ~4GB cap with
+        #   "Failed to resume session: ENOMEM: not enough memory"
+        # Bump the heap to 8 GB only on resume — fresh starts don't
+        # need the headroom and we'd rather not let every spawn pin
+        # that much address space.
+        spawn_env = dict(self.env or {})
+        env_overrides: dict[str, str] = {}
+        if self._session_id:
+            existing = spawn_env.get("NODE_OPTIONS", "")
+            flag = "--max-old-space-size=8192"
+            if "max-old-space-size" not in existing:
+                merged = (existing + " " + flag).strip()
+                spawn_env["NODE_OPTIONS"] = merged
+                env_overrides["NODE_OPTIONS"] = merged
+
+        cmd = self.build_command(args, env_overrides)
         logger.info(
             "agent %s: spawning claude session (resume=%s)",
             self.agent_id, bool(self._session_id),
@@ -381,7 +401,7 @@ class ClaudeSession:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
-            env=self.env,
+            env=spawn_env or self.env,
             limit=STREAM_READER_LIMIT_BYTES,
         )
         if self.audit is not None:

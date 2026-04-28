@@ -41,6 +41,11 @@ class Daemon:
         self.daemon_cfg = daemon_cfg
         self.workers: dict[str, Worker] = {}
         self._stop = asyncio.Event()
+        # Cap on per-worker warm wait. A claude resume on a long
+        # session takes seconds, not minutes; 120s is the upper bound
+        # past which we give up on this agent and let the next one
+        # start (the wedged worker keeps trying in the background).
+        self._warm_serialise_timeout = 120.0
 
     async def run(self) -> None:
         logger.info("puffoagent portal starting; home=%s", home_dir())
@@ -121,12 +126,21 @@ class Daemon:
                     worker = Worker(self.daemon_cfg, agent_cfg)
                     self.workers[agent_id] = worker
                     worker.start()
+                    # Serialise heavy startup. ``adapter.warm()`` reads
+                    # the persisted session file into Node's heap;
+                    # spawning N agents in parallel piles N copies of
+                    # the transcript into memory at once and OOMs the
+                    # box. Awaiting per-worker keeps peak RSS tied to
+                    # one agent at a time. Capped so a wedged warm
+                    # can't pin the whole reconciler.
+                    await worker.wait_warm(timeout=self._warm_serialise_timeout)
                 elif _worker_needs_restart(worker.agent_cfg, agent_cfg):
                     logger.info("agent %s: config changed, restarting worker", agent_id)
                     await self._stop_worker(agent_id)
                     worker = Worker(self.daemon_cfg, agent_cfg)
                     self.workers[agent_id] = worker
                     worker.start()
+                    await worker.wait_warm(timeout=self._warm_serialise_timeout)
                 else:
                     worker.agent_cfg = agent_cfg
             elif desired_state == "paused":

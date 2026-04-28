@@ -840,11 +840,22 @@ class DockerCLIAdapter(Adapter):
         )
         return self._session
 
-    def _build_command(self, extra_args: list[str]) -> list[str]:
-        cmd = [
-            "docker", "exec", "-i", self.container_name,
+    def _build_command(
+        self,
+        extra_args: list[str],
+        env_overrides: dict[str, str] | None = None,
+    ) -> list[str]:
+        cmd: list[str] = ["docker", "exec", "-i"]
+        # Per-spawn env vars the in-container claude must see — most
+        # commonly ``NODE_OPTIONS=--max-old-space-size=8192`` injected
+        # by ClaudeSession on resume. Inserted before the container
+        # name so docker treats them as exec flags.
+        for key, value in (env_overrides or {}).items():
+            cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend([
+            self.container_name,
             "claude", "--dangerously-skip-permissions",
-        ]
+        ])
         if self.model:
             cmd.extend(["--model", self.model])
         cmd.extend(extra_args)
