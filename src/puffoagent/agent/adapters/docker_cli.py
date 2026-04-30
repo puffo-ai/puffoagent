@@ -847,9 +847,10 @@ class DockerCLIAdapter(Adapter):
     ) -> list[str]:
         cmd: list[str] = ["docker", "exec", "-i"]
         # Per-spawn env vars the in-container claude must see — most
-        # commonly ``NODE_OPTIONS=--max-old-space-size=8192`` injected
-        # by ClaudeSession on resume. Inserted before the container
-        # name so docker treats them as exec flags.
+        # commonly ``NODE_OPTIONS=--max-old-space-size=<MB>`` injected
+        # by ClaudeSession on resume, sized at daemon startup to 50%
+        # of the docker VM's MemTotal (see ``docker_memory``). Inserted
+        # before the container name so docker treats them as exec flags.
         for key, value in (env_overrides or {}).items():
             cmd.extend(["-e", f"{key}={value}"])
         cmd.extend([

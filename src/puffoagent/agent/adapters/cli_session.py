@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .base import TurnResult
+from .docker_memory import resume_heap_cap_mb
 
 logger = logging.getLogger(__name__)
 
@@ -377,14 +378,15 @@ class ClaudeSession:
         # Resuming reads the entire transcript into Node's heap; long
         # sessions trip the default ~4GB cap with
         #   "Failed to resume session: ENOMEM: not enough memory"
-        # Bump the heap to 8 GB only on resume — fresh starts don't
-        # need the headroom and we'd rather not let every spawn pin
-        # that much address space.
+        # Bump the heap on resume only (fresh starts don't need the
+        # headroom). The cap is sized to 50% of the docker VM's
+        # MemTotal at daemon startup — see ``docker_memory`` — so we
+        # never ask V8 for more than the host can actually supply.
         spawn_env = dict(self.env or {})
         env_overrides: dict[str, str] = {}
         if self._session_id:
             existing = spawn_env.get("NODE_OPTIONS", "")
-            flag = "--max-old-space-size=8192"
+            flag = f"--max-old-space-size={resume_heap_cap_mb()}"
             if "max-old-space-size" not in existing:
                 merged = (existing + " " + flag).strip()
                 spawn_env["NODE_OPTIONS"] = merged

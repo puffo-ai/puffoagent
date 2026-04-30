@@ -16,6 +16,8 @@ import shutil
 import signal
 import time
 
+from puffoagent.agent.adapters.docker_memory import init_resume_heap_cap
+
 from .state import (
     AgentConfig,
     DaemonConfig,
@@ -50,6 +52,14 @@ class Daemon:
     async def run(self) -> None:
         logger.info("puffoagent portal starting; home=%s", home_dir())
         interval = max(0.5, self.daemon_cfg.reconcile_interval_seconds)
+
+        # Probe the docker VM size once and cache the resume-time
+        # heap cap (50% of MemTotal, clamped). Done before the
+        # reconciler so the first batch of resuming workers picks
+        # up a sized cap instead of the fallback. Cheap (~tens of ms)
+        # and best-effort: if docker is unreachable the helper logs
+        # a warning and falls back to a safe default.
+        await init_resume_heap_cap()
 
         # Fire a one-shot version check so the operator sees an
         # actionable warning at startup if their daemon is older than
