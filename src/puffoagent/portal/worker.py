@@ -120,6 +120,18 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
                     "google.api_key in daemon.yml (set via `puffoagent init` or "
                     "by editing ~/.puffoagent/daemon.yml)."
                 )
+        # Per-agent overrides win, then daemon-wide default, then
+        # empty (no cap). Empty string is the "unset" sentinel at
+        # both layers — None would also work but YAML round-trips
+        # cleaner with strings.
+        memory_limit = (
+            agent_cfg.runtime.docker_memory_limit
+            or daemon_cfg.docker_memory_limit
+        )
+        memory_reservation = (
+            agent_cfg.runtime.docker_memory_reservation
+            or daemon_cfg.docker_memory_reservation
+        )
         return DockerCLIAdapter(
             agent_id=agent_cfg.id,
             model=agent_cfg.runtime.model or daemon_cfg.anthropic.model or "",
@@ -135,6 +147,8 @@ def build_adapter(daemon_cfg: DaemonConfig, agent_cfg: AgentConfig) -> Adapter:
             team=agent_cfg.mattermost.team_name,
             harness=harness,
             google_api_key=google_key,
+            memory_limit=memory_limit,
+            memory_reservation=memory_reservation,
         )
 
     if kind == "cli-local":

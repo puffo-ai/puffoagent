@@ -4,6 +4,38 @@ All notable changes to `puffoagent` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] — 2026-04-29
+
+### Added
+- **Per-container memory caps for `cli-docker` agents.** Two new
+  daemon-yml knobs, `docker_memory_limit` and
+  `docker_memory_reservation`, map directly to `docker run`'s
+  `--memory` (hard ceiling) and `--memory-reservation` (soft
+  floor) when set. Per-agent overrides live in `agent.yml` under
+  `runtime.docker_memory_limit` / `runtime.docker_memory_reservation`
+  for the rare case where one heavy agent needs more headroom
+  than the daemon-wide default.
+
+  **Why this matters.** v0.7.2 reverted the Node heap pin after
+  diagnosing the ENOMEM-on-read failures as kernel-level page
+  exhaustion rather than V8 heap exhaustion. That diagnosis was
+  correct but only half the fix: with `vm.overcommit_memory=1`
+  and no per-container cgroup caps, a single runaway claude
+  inside one agent container could commit enough virtual memory
+  to drain the WSL2 VM's swap, after which every other
+  container's small reads (MCP config, credentials file)
+  returned `ENOMEM` at the kernel layer. Capping each container
+  gives the kernel a clear blast radius — when one container
+  exceeds its `--memory`, OOM kills land inside *that* container
+  and the worker's existing `_ensure_running` respawn path
+  picks up where it left off, sparing neighbours entirely.
+
+  Defaults are empty (no flags injected, current behavior). On
+  a 6 GiB Docker Desktop VM with ~7 active agents, `1.5g` hard
+  / `512m` soft was verified to stop the cascading-ENOMEM
+  failures in this release's regression scenario. Sizing rule
+  of thumb in `config.example.yml`.
+
 ## [0.7.2] — 2026-04-29
 
 ### Fixed

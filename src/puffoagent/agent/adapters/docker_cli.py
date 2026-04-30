@@ -202,6 +202,8 @@ class DockerCLIAdapter(Adapter):
         owner_username: str = "",
         harness=None,
         google_api_key: str = "",
+        memory_limit: str = "",
+        memory_reservation: str = "",
     ):
         self.agent_id = agent_id
         self.model = model
@@ -236,6 +238,17 @@ class DockerCLIAdapter(Adapter):
         # GEMINI_API_KEY=...`` per turn. Claude Code and hermes don't
         # use it.
         self.google_api_key = google_api_key
+        # Optional cgroup memory caps applied to the container at
+        # ``docker run`` time. Empty strings mean "no flag" — Docker's
+        # default of an unbounded container. Set to bound a single
+        # runaway claude from poisoning the whole VM (the failure
+        # mode behind the v0.7.2 ENOMEM-on-read incident: with
+        # vm.overcommit_memory=1 + multiple containers competing for
+        # ~6 GiB of WSL2 RAM, one process's commits drained the
+        # swap and every other container's small reads started
+        # returning ENOMEM at the kernel layer).
+        self.memory_limit = memory_limit
+        self.memory_reservation = memory_reservation
         # Which agent engine runs inside the container. Default is
         # Claude Code — the stream-json + --resume path. Hermes
         # swaps in a one-shot ``hermes chat -q`` per turn. See
@@ -1165,12 +1178,24 @@ class DockerCLIAdapter(Adapter):
             # claude CLI can spawn it as an MCP server.
             "-v", f"{self.mcp_script_dir}:/opt/puffoagent-mcp:ro",
             "--init",  # reap zombies from claude's child processes
+        ]
+        # Cgroup caps. ``--memory`` is a hard ceiling — exceeding it
+        # OOM-kills processes inside *this* container only, sparing
+        # neighbours. ``--memory-reservation`` is a soft floor: the
+        # kernel preferentially reclaims pages from containers above
+        # their reservation when the VM is under pressure. Either or
+        # both can be empty; we only inject the flag when set.
+        if self.memory_limit:
+            cmd.extend(["--memory", self.memory_limit])
+        if self.memory_reservation:
+            cmd.extend(["--memory-reservation", self.memory_reservation])
+        cmd.extend([
             self.image,
             # NOTE: do NOT pass a command override here. The image's
             # CMD is a polling tail on the audit log so docker logs
             # streams turn events. Passing `sleep infinity` as
             # positional argv clobbers the CMD.
-        ]
+        ])
         rc, _, stderr = await _run_cmd(cmd, check=False)
         if rc != 0:
             raise RuntimeError(

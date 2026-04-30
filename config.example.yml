@@ -45,3 +45,22 @@ skills_dir: ""
 # agents.
 reconcile_interval_seconds: 2.0
 runtime_heartbeat_seconds:  5.0
+
+# cli-docker resource caps applied to every agent container at
+# `docker run` time. Empty (default) leaves containers uncapped —
+# fine on a beefy host, but on a small Docker Desktop VM a single
+# runaway claude can drain the VM's swap and starve sibling
+# containers' read syscalls (kernel ENOMEM). Bound each container
+# to give the kernel a clear blast radius.
+#
+# Sizing rule of thumb: with N agents on a VM of M MB, plus ~1 GiB
+# kernel/cache headroom and ~1 GiB for any non-agent containers
+# (postgres etc.), each agent gets (M - 2048) / N MB. Subtract a
+# bit more for cold-boot peaks. On a 6 GiB VM with 7 agents that
+# lands around 512m soft / 1.5g hard.
+#
+# Per-agent overrides live in agent.yml under
+# `runtime.docker_memory_limit` / `runtime.docker_memory_reservation`
+# — set there if a single heavy agent needs more headroom.
+docker_memory_limit:        ""   # e.g. "1.5g" — hard ceiling, --memory
+docker_memory_reservation:  ""   # e.g. "512m" — soft floor, --memory-reservation

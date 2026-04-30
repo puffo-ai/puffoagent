@@ -634,6 +634,17 @@ class DaemonConfig:
     skills_dir: str = ""  # absolute path; empty means agents get no shared skills
     reconcile_interval_seconds: float = 2.0
     runtime_heartbeat_seconds: float = 5.0
+    # Daemon-wide defaults for cli-docker resource caps. Empty =
+    # don't pass --memory / --memory-reservation, i.e. the container
+    # gets the docker daemon default (no per-container cgroup cap,
+    # so the whole VM's memory is fair game). Set to a docker memory
+    # string ("768m", "1.5g") to bound each agent container — this
+    # protects neighbouring containers from a single runaway claude.
+    # Per-agent ``runtime.docker_memory_limit`` /
+    # ``runtime.docker_memory_reservation`` override these for
+    # individual agents; empty there means inherit.
+    docker_memory_limit: str = ""
+    docker_memory_reservation: str = ""
 
     def has_server_sync(self) -> bool:
         return bool(self.server.url and self.server.user_token)
@@ -650,6 +661,8 @@ class DaemonConfig:
             skills_dir=raw.get("skills_dir", ""),
             reconcile_interval_seconds=float(raw.get("reconcile_interval_seconds", 2.0)),
             runtime_heartbeat_seconds=float(raw.get("runtime_heartbeat_seconds", 5.0)),
+            docker_memory_limit=raw.get("docker_memory_limit", ""),
+            docker_memory_reservation=raw.get("docker_memory_reservation", ""),
         )
         for name in ("anthropic", "openai", "google"):
             p = raw.get(name) or {}
@@ -675,6 +688,8 @@ class DaemonConfig:
             "skills_dir": self.skills_dir,
             "reconcile_interval_seconds": self.reconcile_interval_seconds,
             "runtime_heartbeat_seconds": self.runtime_heartbeat_seconds,
+            "docker_memory_limit": self.docker_memory_limit,
+            "docker_memory_reservation": self.docker_memory_reservation,
             "anthropic": asdict(self.anthropic),
             "openai": asdict(self.openai),
             "google": asdict(self.google),
@@ -724,6 +739,12 @@ class RuntimeConfig:
     # cli-docker: override the default image tag. Empty → the bundled
     # image that puffoagent builds from its inline Dockerfile.
     docker_image: str = ""
+    # cli-docker: per-agent resource caps. Empty = inherit the
+    # daemon-wide ``docker_memory_limit`` / ``docker_memory_reservation``
+    # from daemon.yml; if those are also empty, no cap is applied.
+    # Docker memory string format: "768m", "1.5g", or raw bytes.
+    docker_memory_limit: str = ""
+    docker_memory_reservation: str = ""
     # cli-local: Claude Code permission mode. See
     # https://code.claude.com/docs/en/permission-modes for what each
     # value auto-approves. ``default`` (claude's built-in) auto-
@@ -824,6 +845,8 @@ class AgentConfig:
                 api_key=rt.get("api_key", ""),
                 allowed_tools=list(rt.get("allowed_tools") or []),
                 docker_image=rt.get("docker_image", ""),
+                docker_memory_limit=rt.get("docker_memory_limit", ""),
+                docker_memory_reservation=rt.get("docker_memory_reservation", ""),
                 permission_mode=rt.get("permission_mode", "default"),
                 harness=harness,
                 max_turns=int(rt.get("max_turns", 10)),
