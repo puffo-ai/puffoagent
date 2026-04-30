@@ -846,11 +846,12 @@ class DockerCLIAdapter(Adapter):
         env_overrides: dict[str, str] | None = None,
     ) -> list[str]:
         cmd: list[str] = ["docker", "exec", "-i"]
-        # Per-spawn env vars the in-container claude must see — most
-        # commonly ``NODE_OPTIONS=--max-old-space-size=<MB>`` injected
-        # by ClaudeSession on resume, sized at daemon startup to 50%
-        # of the docker VM's MemTotal (see ``docker_memory``). Inserted
-        # before the container name so docker treats them as exec flags.
+        # Per-spawn env vars the in-container claude must see.
+        # ``ClaudeSession`` doesn't inject any today (see _spawn for
+        # why the v0.7.1 NODE_OPTIONS bump was reverted), but the
+        # plumbing is here so a future caller can set per-spawn env
+        # without touching ``docker exec`` callsites. Inserted before
+        # the container name so docker treats them as exec flags.
         for key, value in (env_overrides or {}).items():
             cmd.extend(["-e", f"{key}={value}"])
         cmd.extend([

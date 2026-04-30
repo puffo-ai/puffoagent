@@ -4,6 +4,46 @@ All notable changes to `puffoagent` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-04-29
+
+### Fixed
+- **Spurious `ENOMEM: not enough memory, read` failures during
+  resume, refresh one-shots, and ordinary turns** on Docker
+  Desktop hosts. The v0.7.1 fix bumped Node's old-space cap to
+  8 GiB on resume to dodge what we read as V8 heap exhaustion;
+  v0.7.2 immediately scaled the cap to 50% of `docker info`
+  `MemTotal`. Both were treating the wrong layer.
+
+  The error was kernel ENOMEM, not V8 OOM (V8 heap-OOM looks
+  like `FATAL ERROR: Reached heap limit Allocation failed`, not
+  the read-syscall ENOMEM we observed). Inside a 5.79 GiB WSL2
+  VM with multiple `puffo-*` containers, pinning the long-lived
+  claude's virtual ceiling *above* the physical ceiling made
+  things worse: V8 delayed GC, steady-state RSS climbed, and
+  sibling processes — the refresh one-shot's fresh `docker exec`
+  claude, MCP config reads, page-cache fills — couldn't get
+  pages. Symptoms then surfaced as auth failures (refresh
+  one-shot rc=1) and turn crashes ("Invalid MCP configuration:
+  Failed to read file: ENOMEM").
+
+  The actual fix shipped in v0.7.1 was the *other* half of
+  a8e90c2: **serialised warm**. With one resume at a time,
+  default V8 heap (~4 GiB on 64-bit) is plenty for any
+  transcript that should be resumed in the first place — the
+  largest on disk on the regression host is 47 MB, parsing to
+  ~300-400 MB. Sessions whose JSONL exceeds ~500 MB should be
+  compacted or rotated, not loaded against a wider heap cap on
+  a smaller VM.
+
+### Removed
+- `puffoagent.agent.adapters.docker_memory` module (introduced
+  earlier in this release cycle to size the heap cap from
+  `docker info`). No callers after the revert. The widened
+  `build_command(extra_args, env_overrides)` signature stays —
+  harmless, useful for any future per-spawn env injection.
+- `tests/test_resume_heap_cap.py`. The behavior it covered no
+  longer exists.
+
 ## [0.7.1] — 2026-04-23
 
 ### Fixed

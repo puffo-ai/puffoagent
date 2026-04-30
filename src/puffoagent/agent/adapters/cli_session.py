@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .base import TurnResult
-from .docker_memory import resume_heap_cap_mb
 
 logger = logging.getLogger(__name__)
 
@@ -375,23 +374,22 @@ class ClaudeSession:
         if self._session_id:
             args.extend(["--resume", self._session_id])
 
-        # Resuming reads the entire transcript into Node's heap; long
-        # sessions trip the default ~4GB cap with
-        #   "Failed to resume session: ENOMEM: not enough memory"
-        # Bump the heap on resume only (fresh starts don't need the
-        # headroom). The cap is sized to 50% of the docker VM's
-        # MemTotal at daemon startup — see ``docker_memory`` — so we
-        # never ask V8 for more than the host can actually supply.
-        spawn_env = dict(self.env or {})
+        # No NODE_OPTIONS injection. The "ENOMEM: not enough memory,
+        # read" failure that prompted v0.7.1's
+        # ``--max-old-space-size=8192`` bump was kernel-level page
+        # exhaustion (multiple agents resuming in parallel inside a
+        # ~6 GiB Docker Desktop VM), NOT V8 heap exhaustion — V8
+        # heap-OOM looks like ``FATAL ERROR: Reached heap limit``,
+        # not the read-syscall ENOMEM we observed. Pinning a virtual
+        # ceiling above the physical ceiling actually made things
+        # worse: V8 delayed GC and steady-state RSS climbed, leaving
+        # fewer pages for sibling processes (refresh one-shots, MCP
+        # config reads). Serialised warm in worker.py is the real
+        # fix; default V8 heap (~4 GiB on 64-bit) is plenty for any
+        # transcript that should be resumed in the first place.
+        # ``env_overrides`` stays in the signature for future
+        # per-spawn env injection without touching every caller.
         env_overrides: dict[str, str] = {}
-        if self._session_id:
-            existing = spawn_env.get("NODE_OPTIONS", "")
-            flag = f"--max-old-space-size={resume_heap_cap_mb()}"
-            if "max-old-space-size" not in existing:
-                merged = (existing + " " + flag).strip()
-                spawn_env["NODE_OPTIONS"] = merged
-                env_overrides["NODE_OPTIONS"] = merged
-
         cmd = self.build_command(args, env_overrides)
         logger.info(
             "agent %s: spawning claude session (resume=%s)",
@@ -403,7 +401,7 @@ class ClaudeSession:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
-            env=spawn_env or self.env,
+            env=self.env,
             limit=STREAM_READER_LIMIT_BYTES,
         )
         if self.audit is not None:
