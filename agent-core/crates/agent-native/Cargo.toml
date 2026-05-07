@@ -1,0 +1,31 @@
+[package]
+name = "agent-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Native Rust boundary for the local agent core runtime"
+license = "Apache-2.0"
+
+[lib]
+name = "agent_native"
+
+[features]
+default = []
+dev-tools = ["client/dev-tools"]
+apple-keychain = [
+  "client/apple-keychain",
+  "crypto/apple-keychain",
+  "dep:security-framework",
+  "dep:security-framework-sys",
+]
+
+[dependencies]
+client = { package = "puffo-client", path = "../../core/crates/client" }
+crypto = { package = "puffo-crypto", path = "../../core/crates/crypto" }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+types = { package = "puffo-types", path = "../../core/crates/types" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = { version = "3.7", optional = true }
+security-framework-sys = { version = "2.15", optional = true }

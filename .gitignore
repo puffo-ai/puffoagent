@@ -39,3 +39,8 @@ agents/*/memory/
 agents/*/workspace/
 daemon.yml
 daemon.pid
+
+# Local reference checkouts used while rebuilding cli-local.
+# The tracked Rust core dependency lives at agent-core/core as a git submodule.
+/core/
+/hermes-agent/

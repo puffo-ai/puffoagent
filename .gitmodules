@@ -1,0 +1,6 @@
+[submodule "agent-core/core"]
+	path = agent-core/core
+	url = https://github.com/puffo-ai/core.git
+[submodule "puffo-core-han-group"]
+	path = puffo-core-han-group
+	url = https://github.com/puffo-ai/puffo-core-han-group.git

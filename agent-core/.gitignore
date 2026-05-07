@@ -1,0 +1,13 @@
+/bin/
+dist/
+node_modules/
+target/
+*.tgz
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.db
+.env
+.env.*
+*.log
+.DS_Store
