@@ -7,6 +7,7 @@ This is the short reviewer handoff for the local agent-core MVP.
 - Parent workspace branch: `feature/agent-core-local-mvp`
 - Parent workspace commit: use `git rev-parse --short HEAD` from this branch
 - Parent workspace remote: `https://github.com/puffo-ai/puffoagent.git`
+- Parent review PR: https://github.com/puffo-ai/puffoagent/pull/1
 - Web submodule branch: `feature/agent-core-web-signed-mvp`
 - Web submodule commit: `165c6a0 feat(web): add agent core web-signed handoff`
 
@@ -30,6 +31,7 @@ shasum -a 256 /Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-local-
 
 | Area | PR | State |
 | --- | --- | --- |
+| Parent runtime integration | https://github.com/puffo-ai/puffoagent/pull/1 | Open, mergeable, CI green |
 | Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, mergeable |
 | Backend signer ids / invite proof | https://github.com/puffo-ai/puffo-server/pull/25 | Open, mergeable, CI green |
 | Backend daemon pairing contract | https://github.com/puffo-ai/puffo-server/pull/26 | Open, mergeable |
@@ -76,6 +78,22 @@ Repository hygiene:
 ```bash
 git diff --check
 find agent-core -maxdepth 1 -name '*.tgz' -print
+```
+
+## Agent-Core CI Note
+
+An `agent-core` GitHub Actions workflow should be added once a token with
+`workflow` scope is available. The attempted workflow push was rejected by
+GitHub because this machine's OAuth token cannot create or update
+`.github/workflows/*`.
+
+The proposed workflow should run these commands on macOS:
+
+```bash
+(cd agent-core && npm run check:core-patch)
+(cd agent-core && npm test)
+(cd agent-core && npm run check:package)
+(cd agent-core && npm run smoke:package)
 ```
 
 ## Current Blockers

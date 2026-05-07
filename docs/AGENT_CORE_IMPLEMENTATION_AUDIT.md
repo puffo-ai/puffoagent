@@ -1021,10 +1021,14 @@ the scoped package is not yet published from this environment; actual release
 still requires npm org access.
 The parent implementation has been assembled against the existing
 `puffo-ai/puffoagent` runtime repository on branch
-`feature/agent-core-local-mvp`. `npm whoami
---registry=https://registry.npmjs.org/` returned `ENEEDAUTH`, so publishing
-`@puffo-ai/agent-core` cannot be performed from this machine without npm
-login/org access.
+`feature/agent-core-local-mvp` and opened as
+https://github.com/puffo-ai/puffoagent/pull/1. The parent PR is open,
+mergeable, and its existing Python smoke CI matrix is green. A dedicated
+agent-core workflow was attempted but GitHub rejected the push because the
+current OAuth token lacks `workflow` scope for `.github/workflows/*`.
+`npm whoami --registry=https://registry.npmjs.org/` returned `ENEEDAUTH`, so
+publishing `@puffo-ai/agent-core` cannot be performed from this machine without
+npm login/org access.
 
 ## Completion Decision
 
@@ -1050,7 +1054,9 @@ The full objective is not production-complete until:
 6. product/backend decide whether successful server-confirmed pairing should
    automatically mint, rotate, or revoke scoped local grants;
 7. the parent `puffo-ai/puffoagent` branch is reviewed and merged;
-8. npm credentials with access to the `@puffo-ai` org are available so
+8. a repo owner or token with `workflow` scope adds the dedicated `agent-core`
+   CI workflow described in `AGENT_CORE_REVIEW_HANDOFF.md`;
+9. npm credentials with access to the `@puffo-ai` org are available so
    `@puffo-ai/agent-core` can be published after release approval.
 
 For the fastest MVP, Web can keep signing/registering the agent association
