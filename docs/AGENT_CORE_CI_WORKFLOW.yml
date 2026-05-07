@@ -1,0 +1,69 @@
+name: agent-core
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent-core/**"
+      - "docs/patches/agent-core-core-upstream.*"
+      - ".github/workflows/agent-core.yml"
+      - ".gitmodules"
+  pull_request:
+    branches: [main]
+    paths:
+      - "agent-core/**"
+      - "docs/patches/agent-core-core-upstream.*"
+      - ".github/workflows/agent-core.yml"
+      - ".gitmodules"
+
+jobs:
+  macos-package:
+    name: macOS package and runtime tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        working-directory: agent-core
+        run: npm ci
+
+      - name: Verify core patch handoff
+        working-directory: agent-core
+        run: npm run check:core-patch
+
+      - name: Run agent-core tests
+        working-directory: agent-core
+        run: npm test
+
+      - name: Run Rust native checks
+        working-directory: agent-core
+        run: npm run test:native
+
+      - name: Verify package manifest
+        working-directory: agent-core
+        run: npm run check:package
+
+      - name: Run package smoke test
+        working-directory: agent-core
+        run: npm run smoke:package
+
+      - name: Run production package smoke test
+        working-directory: agent-core
+        run: AGENT_CORE_NATIVE_BUILD_PROFILE=prod npm run smoke:package
+
+      - name: Verify production publish dry-run
+        working-directory: agent-core
+        run: AGENT_CORE_NATIVE_BUILD_PROFILE=prod npm publish --dry-run --registry=https://registry.npmjs.org/

@@ -8,11 +8,10 @@ deployment permissions.
 Current blocker: the implementation token does not have GitHub `workflow`
 scope.
 
-Copy the proposed workflow from the local handoff into the canonical parent
-repo:
+Copy the proposed workflow from this PR:
 
 ```text
-/Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-workflow.yml
+docs/AGENT_CORE_CI_WORKFLOW.yml
 ```
 
 Destination:
