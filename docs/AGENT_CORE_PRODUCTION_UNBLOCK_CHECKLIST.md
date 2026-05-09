@@ -19,6 +19,10 @@ https://github.com/puffo-ai/core/pull/18
 branch: feature/agent-core-native-bridge
 commit: ece389a12da5ce3745a213d54a0d55b1b56e3729
 status: open, non-draft, clean as of 2026-05-09
+local acceptance gate passed on 2026-05-09:
+  `cargo build -p puffo-client`
+  `cargo test -p puffo-client`                         (5 tests)
+  `cargo test -p puffo-client --features dev-tools`    (131 tests)
 ```
 
 Required action:

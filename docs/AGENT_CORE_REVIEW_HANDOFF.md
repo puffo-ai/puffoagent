@@ -32,7 +32,7 @@ shasum -a 256 /Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-local-
 | Area | PR | State |
 | --- | --- | --- |
 | Parent runtime integration | https://github.com/puffo-ai/puffoagent/pull/1 | Open, clean, CI green |
-| Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, clean |
+| Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, clean; local puffo-client build/default/dev-tools tests pass |
 | Backend signer ids / invite proof | https://github.com/puffo-ai/puffo-server/pull/25 | Open, clean, CI green; local focused invite/membership/spaces tests pass |
 | Backend daemon pairing contract | https://github.com/puffo-ai/puffo-server/pull/26 | Open, clean, no reported checks; local focused pairing tests pass |
 | Web non-UI handoff | https://github.com/puffo-ai/puffo-core-han-group/pull/52 | Open, clean, CI green |

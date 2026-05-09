@@ -574,6 +574,10 @@ Current PR state rechecked on 2026-05-09:
 core PR #18: OPEN, non-draft, CLEAN
   branch: feature/agent-core-native-bridge -> main
   head: ece389a12da5ce3745a213d54a0d55b1b56e3729
+  local acceptance gate passed on 2026-05-09:
+    `cargo build -p puffo-client`
+    `cargo test -p puffo-client`                         (5 tests)
+    `cargo test -p puffo-client --features dev-tools`    (131 tests)
 backend PR #25: OPEN, non-draft, CLEAN, CI checks successful
   branch: feature/space-event-signer-ids -> dev
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
