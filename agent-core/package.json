@@ -1,0 +1,41 @@
+{
+  "name": "@puffo-ai/agent-core",
+  "version": "0.1.0",
+  "description": "Local agent core runtime for connecting CLI agents to the product message plane.",
+  "type": "module",
+  "files": [
+    "bin/",
+    "dist/src/",
+    "README.md"
+  ],
+  "bin": {
+    "agent": "dist/src/cli/index.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/make-bin-executable.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "build:native:dev": "node scripts/build-native.mjs --profile dev",
+    "build:native:prod": "node scripts/build-native.mjs --profile prod",
+    "prepack": "npm run build && npm run build:native",
+    "prepublishOnly": "node scripts/assert-release-profile.mjs && npm run check:package",
+    "test": "npm run build && npm run build:native:dev && node --test \"dist/tests/**/*.test.js\"",
+    "test:native": "cargo test --manifest-path crates/agent-native/Cargo.toml && cargo test --manifest-path crates/agent-native/Cargo.toml --features dev-tools && cargo check --manifest-path crates/agent-native/Cargo.toml --features apple-keychain --bin agent-native-sidecar",
+    "check:package": "node scripts/check-pack-manifest.mjs",
+    "check:core-patch": "node scripts/check-core-upstream-patch.mjs",
+    "export:core-patch": "node scripts/export-core-upstream-patch.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "doctor": "node ./dist/src/cli/index.js doctor",
+    "start": "node ./dist/src/cli/index.js start"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

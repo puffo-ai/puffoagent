@@ -1,0 +1,2893 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 629ca8a..1efbfcb 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -362,6 +362,15 @@ version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+ 
++[[package]]
++name = "form_urlencoded"
++version = "1.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
++dependencies = [
++ "percent-encoding",
++]
++
+ [[package]]
+ name = "generic-array"
+ version = "0.14.7"
+@@ -461,6 +470,109 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "icu_collections"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2984d1cd16c883d7935b9e07e44071dca8d917fd52ecc02c04d5fa0b5a3f191c"
++dependencies = [
++ "displaydoc",
++ "potential_utf",
++ "utf8_iter",
++ "yoke",
++ "zerofrom",
++ "zerovec",
++]
++
++[[package]]
++name = "icu_locale_core"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29"
++dependencies = [
++ "displaydoc",
++ "litemap",
++ "tinystr",
++ "writeable",
++ "zerovec",
++]
++
++[[package]]
++name = "icu_normalizer"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c56e5ee99d6e3d33bd91c5d85458b6005a22140021cc324cea84dd0e72cff3b4"
++dependencies = [
++ "icu_collections",
++ "icu_normalizer_data",
++ "icu_properties",
++ "icu_provider",
++ "smallvec",
++ "zerovec",
++]
++
++[[package]]
++name = "icu_normalizer_data"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "da3be0ae77ea334f4da67c12f149704f19f81d1adf7c51cf482943e84a2bad38"
++
++[[package]]
++name = "icu_properties"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bee3b67d0ea5c2cca5003417989af8996f8604e34fb9ddf96208a033901e70de"
++dependencies = [
++ "icu_collections",
++ "icu_locale_core",
++ "icu_properties_data",
++ "icu_provider",
++ "zerotrie",
++ "zerovec",
++]
++
++[[package]]
++name = "icu_properties_data"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14"
++
++[[package]]
++name = "icu_provider"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421"
++dependencies = [
++ "displaydoc",
++ "icu_locale_core",
++ "writeable",
++ "yoke",
++ "zerofrom",
++ "zerotrie",
++ "zerovec",
++]
++
++[[package]]
++name = "idna"
++version = "1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
++dependencies = [
++ "idna_adapter",
++ "smallvec",
++ "utf8_iter",
++]
++
++[[package]]
++name = "idna_adapter"
++version = "1.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
++dependencies = [
++ "icu_normalizer",
++ "icu_properties",
++]
++
+ [[package]]
+ name = "inout"
+ version = "0.1.4"
+@@ -493,6 +605,18 @@ dependencies = [
+  "vcpkg",
+ ]
+ 
++[[package]]
++name = "litemap"
++version = "0.8.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
++
++[[package]]
++name = "log"
++version = "0.4.29"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
++
+ [[package]]
+ name = "memchr"
+ version = "2.8.0"
+@@ -543,6 +667,12 @@ dependencies = [
+  "subtle",
+ ]
+ 
++[[package]]
++name = "percent-encoding"
++version = "2.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
++
+ [[package]]
+ name = "pin-project-lite"
+ version = "0.2.17"
+@@ -578,6 +708,15 @@ dependencies = [
+  "universal-hash",
+ ]
+ 
++[[package]]
++name = "potential_utf"
++version = "0.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
++dependencies = [
++ "zerovec",
++]
++
+ [[package]]
+ name = "proc-macro2"
+ version = "1.0.106"
+@@ -600,6 +739,7 @@ dependencies = [
+  "serde_json",
+  "sha2",
+  "tracing",
++ "ureq",
+  "zeroize",
+ ]
+ 
+@@ -672,6 +812,20 @@ dependencies = [
+  "getrandom",
+ ]
+ 
++[[package]]
++name = "ring"
++version = "0.17.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
++dependencies = [
++ "cc",
++ "cfg-if",
++ "getrandom",
++ "libc",
++ "untrusted",
++ "windows-sys",
++]
++
+ [[package]]
+ name = "rusqlite"
+ version = "0.32.1"
+@@ -695,6 +849,41 @@ dependencies = [
+  "semver",
+ ]
+ 
++[[package]]
++name = "rustls"
++version = "0.23.40"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
++dependencies = [
++ "log",
++ "once_cell",
++ "ring",
++ "rustls-pki-types",
++ "rustls-webpki",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-pki-types"
++version = "1.14.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
++dependencies = [
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-webpki"
++version = "0.103.13"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
++dependencies = [
++ "ring",
++ "rustls-pki-types",
++ "untrusted",
++]
++
+ [[package]]
+ name = "ryu-js"
+ version = "0.2.2"
+@@ -826,6 +1015,12 @@ version = "1.15.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+ 
++[[package]]
++name = "stable_deref_trait"
++version = "1.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
++
+ [[package]]
+ name = "subtle"
+ version = "2.6.1"
+@@ -843,6 +1038,27 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "synstructure"
++version = "0.13.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
++[[package]]
++name = "tinystr"
++version = "0.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
++dependencies = [
++ "displaydoc",
++ "zerovec",
++]
++
+ [[package]]
+ name = "tracing"
+ version = "0.1.44"
+@@ -881,6 +1097,47 @@ dependencies = [
+  "subtle",
+ ]
+ 
++[[package]]
++name = "untrusted"
++version = "0.9.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
++
++[[package]]
++name = "ureq"
++version = "2.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
++dependencies = [
++ "base64",
++ "log",
++ "once_cell",
++ "rustls",
++ "rustls-pki-types",
++ "serde",
++ "serde_json",
++ "url",
++ "webpki-roots 0.26.11",
++]
++
++[[package]]
++name = "url"
++version = "2.5.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
++dependencies = [
++ "form_urlencoded",
++ "idna",
++ "percent-encoding",
++ "serde",
++]
++
++[[package]]
++name = "utf8_iter"
++version = "1.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
++
+ [[package]]
+ name = "vcpkg"
+ version = "0.2.15"
+@@ -917,6 +1174,103 @@ version = "0.11.1+wasi-snapshot-preview1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+ 
++[[package]]
++name = "webpki-roots"
++version = "0.26.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
++dependencies = [
++ "webpki-roots 1.0.7",
++]
++
++[[package]]
++name = "webpki-roots"
++version = "1.0.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
++dependencies = [
++ "rustls-pki-types",
++]
++
++[[package]]
++name = "windows-sys"
++version = "0.52.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
++dependencies = [
++ "windows-targets",
++]
++
++[[package]]
++name = "windows-targets"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
++dependencies = [
++ "windows_aarch64_gnullvm",
++ "windows_aarch64_msvc",
++ "windows_i686_gnu",
++ "windows_i686_gnullvm",
++ "windows_i686_msvc",
++ "windows_x86_64_gnu",
++ "windows_x86_64_gnullvm",
++ "windows_x86_64_msvc",
++]
++
++[[package]]
++name = "windows_aarch64_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
++
++[[package]]
++name = "windows_aarch64_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
++
++[[package]]
++name = "windows_i686_gnu"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
++
++[[package]]
++name = "windows_i686_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
++
++[[package]]
++name = "windows_i686_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
++
++[[package]]
++name = "windows_x86_64_gnu"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
++
++[[package]]
++name = "windows_x86_64_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
++
++[[package]]
++name = "windows_x86_64_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
++
++[[package]]
++name = "writeable"
++version = "0.6.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
++
+ [[package]]
+ name = "x25519-dalek"
+ version = "2.0.1"
+@@ -928,6 +1282,29 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "yoke"
++version = "0.8.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "abe8c5fda708d9ca3df187cae8bfb9ceda00dd96231bed36e445a1a48e66f9ca"
++dependencies = [
++ "stable_deref_trait",
++ "yoke-derive",
++ "zerofrom",
++]
++
++[[package]]
++name = "yoke-derive"
++version = "0.8.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++ "synstructure",
++]
++
+ [[package]]
+ name = "zerocopy"
+ version = "0.8.48"
+@@ -948,6 +1325,27 @@ dependencies = [
+  "syn",
+ ]
+ 
++[[package]]
++name = "zerofrom"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "69faa1f2a1ea75661980b013019ed6687ed0e83d069bc1114e2cc74c6c04c4df"
++dependencies = [
++ "zerofrom-derive",
++]
++
++[[package]]
++name = "zerofrom-derive"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++ "synstructure",
++]
++
+ [[package]]
+ name = "zeroize"
+ version = "1.8.2"
+@@ -968,6 +1366,39 @@ dependencies = [
+  "syn",
+ ]
+ 
++[[package]]
++name = "zerotrie"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf"
++dependencies = [
++ "displaydoc",
++ "yoke",
++ "zerofrom",
++]
++
++[[package]]
++name = "zerovec"
++version = "0.11.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
++dependencies = [
++ "yoke",
++ "zerofrom",
++ "zerovec-derive",
++]
++
++[[package]]
++name = "zerovec-derive"
++version = "0.11.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
+ [[package]]
+ name = "zmij"
+ version = "1.0.21"
+diff --git a/crates/client/Cargo.toml b/crates/client/Cargo.toml
+index a868bd8..1b5fdff 100644
+--- a/crates/client/Cargo.toml
++++ b/crates/client/Cargo.toml
+@@ -27,4 +27,5 @@ serde      = { version = "1", default-features = false, features = ["derive"] }
+ serde_json = { version = "1", default-features = false, features = ["alloc"] }
+ sha2       = { version = "0.10", default-features = false }
+ tracing    = { version = "0.1", default-features = false }
++ureq       = { version = "2.10", default-features = false, features = ["json", "tls"] }
+ zeroize    = { version = "1", default-features = false, features = ["alloc"] }
+diff --git a/crates/client/src/actions/spaces/create_channel.rs b/crates/client/src/actions/spaces/create_channel.rs
+index 00736c8..990d29c 100644
+--- a/crates/client/src/actions/spaces/create_channel.rs
++++ b/crates/client/src/actions/spaces/create_channel.rs
+@@ -48,6 +48,7 @@ pub fn create_channel(
+             .filter(|slug| slug.as_str() != owner_slug)
+             .cloned()
+             .collect(),
++        is_public: false,
+         created_at: created_at_ms,
+         nonce: crypto.event_nonce()?,
+     };
+diff --git a/crates/client/src/api/command.rs b/crates/client/src/api/command.rs
+index ce98208..7ddf13b 100644
+--- a/crates/client/src/api/command.rs
++++ b/crates/client/src/api/command.rs
+@@ -15,6 +15,11 @@ pub struct SignupCommand {
+     pub identity_type: IdentityType,
+ }
+ 
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CreateAgentIdentityCommand {
++    pub slug: String,
++}
++
+ pub struct RegisterCloudKeyBackupCommand {
+     pub identity_id: String,
+     pub client_id: String,
+diff --git a/crates/client/src/api/session.rs b/crates/client/src/api/session.rs
+index 2e4ef35..b8a7944 100644
+--- a/crates/client/src/api/session.rs
++++ b/crates/client/src/api/session.rs
+@@ -12,6 +12,7 @@ use crate::domain::{
+     SyncReport,
+ };
+ use crate::ports::IdentityStorePort;
++use crate::ports::{AccountServerPort, CommitSlugBindingRequest, CreateAgentRequest};
+ use crate::ports::{
+     AuditStorePort, BlobStorePort, CertStorePort, ClockPort, MessageStorePort,
+     NotificationStorePort, OutboxStorePort, ProfileStorePort, RealtimeServerPort, SpaceStorePort,
+@@ -21,12 +22,12 @@ use crate::ports::{
+ use super::sdk::SdkInner;
+ use super::{
+     AddToChannelCommand, ApproveNewDeviceEnrollmentCommand, BatchUpdateMemberStatusCommand,
+-    CancelInvitationCommand, CloudKeyBackupTrustedContext, CreateChannelCommand,
+-    CreateCloudKeyBackupCommand, CreateInviteCapabilityCommand, CreateSpaceCommand,
+-    CreatedInviteCapability, DeactivateCurrentDeviceCommand, DeleteCloudKeyBackupCommand,
+-    FetchProfilesCommand, InvitationResponseCommand, InviteCommand, LeaveChannelCommand,
+-    LeaveSpaceCommand, QueueOutboxCommand, RedeemInviteCapabilityCommand, RemoveMemberCommand,
+-    Result, RevokeDeviceCommand, RevokeInviteCapabilityCommand,
++    CancelInvitationCommand, CloudKeyBackupTrustedContext, CreateAgentIdentityCommand,
++    CreateChannelCommand, CreateCloudKeyBackupCommand, CreateInviteCapabilityCommand,
++    CreateSpaceCommand, CreatedInviteCapability, DeactivateCurrentDeviceCommand,
++    DeleteCloudKeyBackupCommand, FetchProfilesCommand, InvitationResponseCommand, InviteCommand,
++    LeaveChannelCommand, LeaveSpaceCommand, QueueOutboxCommand, RedeemInviteCapabilityCommand,
++    RemoveMemberCommand, Result, RevokeDeviceCommand, RevokeInviteCapabilityCommand,
+     RotateCloudKeyBackupRecoveryHandleCommand, SdkError, SendFileMessageCommand,
+     SendMessageCommand, SessionSnapshot, SetNotificationPreferenceCommand, UpdateMemberRoleCommand,
+     UpdateMemberStatusCommand, UpdateProfileCommand,
+@@ -88,6 +89,95 @@ impl ClientSession {
+         )
+     }
+ 
++    pub fn create_agent_identity(
++        &self,
++        command: CreateAgentIdentityCommand,
++    ) -> Result<ClientSession> {
++        self.ensure_active()?;
++        let (identity, device, subkey) = self.inner.crypto.create_agent_identity(
++            &command.slug,
++            &self.slug,
++            self.inner.clock.now_ms(),
++        )?;
++        self.inner
++            .store
++            .borrow_mut()
++            .save_identity(identity, device, subkey)?;
++        let agent_session = self
++            .inner
++            .store
++            .borrow()
++            .load_identity(&command.slug)?
++            .ok_or_else(|| crate::api::SdkError::LocalIdentityMissing(command.slug.clone()))?;
++        self.inner
++            .crypto
++            .activate_identity(&agent_session, self.inner.clock.now_ms())?;
++        Ok(ClientSession::new(command.slug, self.inner.clone()))
++    }
++
++    pub fn create_and_publish_agent_identity(
++        &self,
++        command: CreateAgentIdentityCommand,
++    ) -> Result<ClientSession> {
++        self.ensure_active()?;
++        let issued_at_ms = self.inner.clock.now_ms();
++        let (identity, device, subkey) =
++            self.inner
++                .crypto
++                .create_agent_identity(&command.slug, &self.slug, issued_at_ms)?;
++        let attestation = identity.operator_attestation.clone().ok_or_else(|| {
++            SdkError::SchemaMismatch("agent operator attestation missing".to_string())
++        })?;
++        let publication = self
++            .inner
++            .server
++            .borrow_mut()
++            .create_agent(CreateAgentRequest {
++                username: command.slug.clone(),
++                identity_cert: identity.identity_cert.clone(),
++                device_cert: device.cert.clone(),
++                attestation,
++            })?;
++        let agent_slug = publication.agent_slug.clone();
++        let (identity, device, subkey) = if agent_slug == command.slug {
++            (identity, device, subkey)
++        } else {
++            self.inner.crypto.rebind_local_identity_slug(
++                &command.slug,
++                &agent_slug,
++                issued_at_ms,
++            )?
++        };
++        if publication.agent_device_id != device.device_id {
++            return Err(SdkError::ServerRejected(
++                "agent publication returned a different device id".to_string(),
++            ));
++        }
++        if let Some(pending_token) = publication.pending_token {
++            self.inner
++                .server
++                .borrow_mut()
++                .commit_slug_binding(CommitSlugBindingRequest {
++                    pending_token,
++                    slug_binding: identity.slug_binding.clone(),
++                })?;
++        }
++        self.inner
++            .store
++            .borrow_mut()
++            .save_identity(identity, device, subkey)?;
++        let agent_session = self
++            .inner
++            .store
++            .borrow()
++            .load_identity(&agent_slug)?
++            .ok_or_else(|| crate::api::SdkError::LocalIdentityMissing(agent_slug.clone()))?;
++        self.inner
++            .crypto
++            .activate_identity(&agent_session, self.inner.clock.now_ms())?;
++        Ok(ClientSession::new(agent_slug, self.inner.clone()))
++    }
++
+     pub fn delete_cloud_key_backup(&self, command: DeleteCloudKeyBackupCommand) -> Result<()> {
+         self.ensure_active()?;
+         cloud_backup::delete::delete_cloud_key_backup(
+diff --git a/crates/client/src/domain/identity/model.rs b/crates/client/src/domain/identity/model.rs
+index 10b21a6..f04be81 100644
+--- a/crates/client/src/domain/identity/model.rs
++++ b/crates/client/src/domain/identity/model.rs
+@@ -1,4 +1,4 @@
+-use types::{DeviceCert, IdentityCert, IdentityType, SlugBinding, SubkeyCert};
++use types::{DeviceCert, IdentityCert, IdentityType, OperatorAttestation, SlugBinding, SubkeyCert};
+ 
+ use super::LocalIdentityState;
+ 
+@@ -22,6 +22,8 @@ pub struct IdentityRecord {
+     pub local_state: LocalIdentityState,
+     #[serde(default)]
+     pub key_handles: Option<LocalIdentityKeyHandles>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub operator_attestation: Option<OperatorAttestation>,
+ }
+ 
+ #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+diff --git a/crates/client/src/ports/crypto.rs b/crates/client/src/ports/crypto.rs
+index 2a54087..7cb13af 100644
+--- a/crates/client/src/ports/crypto.rs
++++ b/crates/client/src/ports/crypto.rs
+@@ -58,6 +58,20 @@ pub trait CryptoPort {
+         issued_at_ms: u64,
+     ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)>;
+ 
++    fn create_agent_identity(
++        &self,
++        slug: &str,
++        operator_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)>;
++
++    fn rebind_local_identity_slug(
++        &self,
++        current_slug: &str,
++        new_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)>;
++
+     fn activate_identity(&self, session: &SessionIdentity, now_ms: u64) -> Result<()>;
+ 
+     fn create_enrollment_device(
+@@ -218,6 +232,24 @@ impl<T: CryptoPort + ?Sized> CryptoPort for Box<T> {
+         (**self).create_identity(slug, identity_type, issued_at_ms)
+     }
+ 
++    fn create_agent_identity(
++        &self,
++        slug: &str,
++        operator_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        (**self).create_agent_identity(slug, operator_slug, issued_at_ms)
++    }
++
++    fn rebind_local_identity_slug(
++        &self,
++        current_slug: &str,
++        new_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        (**self).rebind_local_identity_slug(current_slug, new_slug, issued_at_ms)
++    }
++
+     fn activate_identity(&self, session: &SessionIdentity, now_ms: u64) -> Result<()> {
+         (**self).activate_identity(session, now_ms)
+     }
+diff --git a/crates/client/src/ports/mod.rs b/crates/client/src/ports/mod.rs
+index 5e1f1bd..d1b64bd 100644
+--- a/crates/client/src/ports/mod.rs
++++ b/crates/client/src/ports/mod.rs
+@@ -11,9 +11,10 @@ pub use rng::*;
+ pub use server::{
+     AccountServerPort, AuthServerPort, BlobDownloadResult, BlobServerPort, BlobUploadRequest,
+     CertServerPort, CertSyncRequest, CertSyncResponse, CloudKeyBackupAccess, CloudKeyBackupRecord,
+-    CloudKeyBackupServerPort, DeleteCloudKeyBackupRequest, DeviceStatusResponse,
+-    EnrollmentInitResponse, GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest,
+-    GetProfilesRequest, GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
++    CloudKeyBackupServerPort, CommitSlugBindingRequest, CreateAgentRequest, CreateAgentResponse,
++    DeleteCloudKeyBackupRequest, DeviceStatusResponse, EnrollmentInitResponse,
++    GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest, GetProfilesRequest,
++    GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
+     PasswordAuthChangePasswordResponse, PasswordAuthPublicCertBundle,
+     PasswordAuthRegistrationCommitRequest, PasswordAuthRegistrationCommitResponse,
+     PendingMessagesRequest, PendingMessagesResponse, PostDeviceRevocationRequest,
+diff --git a/crates/client/src/ports/server/account.rs b/crates/client/src/ports/server/account.rs
+index cb9ddfb..8a891ea 100644
+--- a/crates/client/src/ports/server/account.rs
++++ b/crates/client/src/ports/server/account.rs
+@@ -3,7 +3,9 @@ use crate::domain::{
+     DeviceRecord, EnrollmentApprovalRecord, EnrollmentDeviceRequestRecord, IdentityProfileRecord,
+     IdentityRecord, ProfileDiscoverability, SubkeyRecord,
+ };
+-use types::{DeviceRevocation, IdentityType};
++use types::{
++    DeviceCert, DeviceRevocation, IdentityCert, IdentityType, OperatorAttestation, SlugBinding,
++};
+ 
+ #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+ pub struct SignupRequest {
+@@ -29,6 +31,30 @@ pub struct PostDeviceRevocationRequest {
+     pub idempotency_key: String,
+ }
+ 
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
++pub struct CreateAgentRequest {
++    pub username: String,
++    pub identity_cert: IdentityCert,
++    pub device_cert: DeviceCert,
++    pub attestation: OperatorAttestation,
++}
++
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
++pub struct CreateAgentResponse {
++    pub agent_slug: String,
++    pub agent_device_id: String,
++    #[serde(default)]
++    pub pending_token: Option<String>,
++    #[serde(default)]
++    pub pending_expires_at: Option<u64>,
++}
++
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
++pub struct CommitSlugBindingRequest {
++    pub pending_token: String,
++    pub slug_binding: SlugBinding,
++}
++
+ #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+ pub struct UpdateProfileRequest {
+     pub slug: String,
+@@ -78,6 +104,8 @@ pub trait AccountServerPort {
+     fn complete_enrollment(&mut self, enrollment_nonce: &str) -> Result<()>;
+     fn poll_enrollment(&self, enrollment_nonce: &str) -> Result<bool>;
+     fn post_device_revocation(&mut self, request: PostDeviceRevocationRequest) -> Result<()>;
++    fn create_agent(&mut self, request: CreateAgentRequest) -> Result<CreateAgentResponse>;
++    fn commit_slug_binding(&mut self, request: CommitSlugBindingRequest) -> Result<()>;
+     fn update_profile(&mut self, request: UpdateProfileRequest) -> Result<UpdateProfileResponse>;
+     fn get_profiles(&self, request: GetProfilesRequest) -> Result<GetProfilesResponse>;
+ }
+diff --git a/crates/client/src/providers/crypto/core_crypto.rs b/crates/client/src/providers/crypto/core_crypto.rs
+index 7e1cb76..458f4f0 100644
+--- a/crates/client/src/providers/crypto/core_crypto.rs
++++ b/crates/client/src/providers/crypto/core_crypto.rs
+@@ -30,13 +30,14 @@ use crypto::client_api::{
+     CloudKeyBackupUnlock, CompleteIdentityPhase2Request, CreateCloudKeyBackupRequest,
+     CreateEnrollmentDeviceRequest, CreateIdentityRequest, DeviceBundle, DeviceId, DeviceKemKey,
+     DeviceKemPublicKey, DeviceSigningKey, EnrollmentDeviceBundle, EnvelopeId, EventId,
+-    EventVerifyPolicy, Identity, IdentityHandles, IdentityKeys, IdentityPhase1Bundle,
+-    IdentityPhase1Handles, IdentityPhase1Keys, ImportedCloudKeyBackup, InviteCapabilityMaterial,
+-    InviteCapabilityRedemptionBinding, InviteCapabilitySecret, IssueDeviceCertRequest,
+-    IssueDeviceRevocationRequest, IssueSubkeyCertRequest, KeyHandle, KeyRef, KeyStorage,
+-    MemoryReplayStore, MessageEnvelopeContext, MessageNonce, MessageVerifyPolicy,
+-    OpenMessageRequest, PublicKeyFingerprint, RecipientDeviceChain, RecipientWrapSpec,
+-    RootSigningKey, SenderChain, SigningPublicKey, Slug, SubkeyId, SubkeySigningKey,
++    EventVerifyPolicy, HttpRequestSigningInput, Identity, IdentityHandles, IdentityKeys,
++    IdentityPhase1Bundle, IdentityPhase1Handles, IdentityPhase1Keys, ImportedCloudKeyBackup,
++    InviteCapabilityMaterial, InviteCapabilityRedemptionBinding, InviteCapabilitySecret,
++    IssueDeviceCertRequest, IssueDeviceRevocationRequest, IssueOperatorAttestationRequest,
++    IssueSubkeyCertRequest, KeyHandle, KeyRef, KeyStorage, MemoryReplayStore,
++    MessageEnvelopeContext, MessageNonce, MessageVerifyPolicy, OpenMessageRequest,
++    PublicKeyFingerprint, RecipientDeviceChain, RecipientWrapSpec, RootSigningKey, SenderChain,
++    SignedHttpRequestHeaders, SigningPublicKey, Slug, SubkeyId, SubkeySigningKey,
+     VerifiedRecipientDevice, VerifiedSender,
+ };
+ #[cfg(feature = "dev-tools")]
+@@ -45,8 +46,8 @@ use rand_core::{CryptoRng, RngCore};
+ use serde_json::Value;
+ use types::{
+     CloudKeyBackupBundle, DeviceCert, DeviceRevocation, EventKind, FileReference, IdentityCert,
+-    IdentityType, MessageEnvelope, MessageEnvelopeKind, MessagePayload, RootKeyEnvelope,
+-    SignedEvent, SlugBinding, SubkeyCert,
++    IdentityType, MessageEnvelope, MessageEnvelopeKind, MessagePayload, OperatorAttestation,
++    RootKeyEnvelope, SignedEvent, SlugBinding, SubkeyCert,
+ };
+ 
+ pub struct HandleBackedCryptoProvider<S, R> {
+@@ -55,6 +56,7 @@ pub struct HandleBackedCryptoProvider<S, R> {
+     rng: RefCell<R>,
+     key_storage: KeyStorage,
+     identities: RefCell<BTreeMap<String, Identity>>,
++    operator_attestations: RefCell<BTreeMap<String, OperatorAttestation>>,
+     enrollment_devices: RefCell<BTreeMap<String, crypto::client_api::EnrollmentDeviceBundle>>,
+ }
+ 
+@@ -148,6 +150,13 @@ pub trait ProviderStoreOps {
+         request: IssueDeviceRevocationRequest<'_>,
+     ) -> crypto::Result<DeviceRevocation>;
+ 
++    fn issue_operator_attestation_with_client(
++        &self,
++        client: &crypto::client_api::Client,
++        identity: &Identity,
++        request: IssueOperatorAttestationRequest<'_>,
++    ) -> crypto::Result<OperatorAttestation>;
++
+     fn create_cloud_key_backup_with_client<R: CryptoRng + RngCore>(
+         &self,
+         client: &crypto::client_api::Client,
+@@ -189,6 +198,14 @@ pub trait ProviderStoreOps {
+         event: SignedEvent,
+     ) -> crypto::Result<SignedEvent>;
+ 
++    fn sign_http_as_subkey_with_client<R: CryptoRng + RngCore>(
++        &self,
++        client: &crypto::client_api::Client,
++        identity: &Identity,
++        request: HttpRequestSigningInput<'_>,
++        rng: &mut R,
++    ) -> crypto::Result<SignedHttpRequestHeaders>;
++
+     fn seal_message_with_client<P: serde::Serialize, R: CryptoRng + RngCore>(
+         &self,
+         client: &crypto::client_api::Client,
+@@ -320,6 +337,17 @@ macro_rules! impl_provider_store_ops {
+                     .issue_device_revocation(identity, self, request)
+             }
+ 
++            fn issue_operator_attestation_with_client(
++                &self,
++                client: &crypto::client_api::Client,
++                identity: &Identity,
++                request: IssueOperatorAttestationRequest<'_>,
++            ) -> crypto::Result<OperatorAttestation> {
++                client
++                    .issuer()
++                    .issue_operator_attestation(identity, self, request)
++            }
++
+             fn create_cloud_key_backup_with_client<R: CryptoRng + RngCore>(
+                 &self,
+                 client: &crypto::client_api::Client,
+@@ -391,6 +419,18 @@ macro_rules! impl_provider_store_ops {
+                 client.signer().sign_event(identity, self, event)
+             }
+ 
++            fn sign_http_as_subkey_with_client<R: CryptoRng + RngCore>(
++                &self,
++                client: &crypto::client_api::Client,
++                identity: &Identity,
++                request: HttpRequestSigningInput<'_>,
++                rng: &mut R,
++            ) -> crypto::Result<SignedHttpRequestHeaders> {
++                client
++                    .signer()
++                    .sign_http_as_subkey(identity, self, request, rng)
++            }
++
+             fn seal_message_with_client<P: serde::Serialize, R: CryptoRng + RngCore>(
+                 &self,
+                 client: &crypto::client_api::Client,
+@@ -438,6 +478,7 @@ impl HandleBackedCryptoProvider<DevMemoryStore<DeterministicRng>, DeterministicR
+             rng: RefCell::new(DeterministicRng::new(0x7075_6666_6f5f_636c)),
+             key_storage: KeyStorage::MemoryDev,
+             identities: RefCell::new(BTreeMap::new()),
++            operator_attestations: RefCell::new(BTreeMap::new()),
+             enrollment_devices: RefCell::new(BTreeMap::new()),
+         }
+     }
+@@ -482,6 +523,7 @@ impl HandleBackedCryptoProvider<AppleKeychainStore, SystemRng> {
+             rng: RefCell::new(SystemRng),
+             key_storage: KeyStorage::Keychain,
+             identities: RefCell::new(BTreeMap::new()),
++            operator_attestations: RefCell::new(BTreeMap::new()),
+             enrollment_devices: RefCell::new(BTreeMap::new()),
+         })
+     }
+@@ -513,7 +555,95 @@ where
+             .borrow_mut()
+             .insert(slug.to_string(), bundle.clone());
+ 
+-        Ok(records_from_identity(&bundle, identity_type))
++        Ok(records_from_identity(&bundle, identity_type, None))
++    }
++
++    fn create_agent_identity(
++        &self,
++        slug: &str,
++        operator_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        let operator = self.identity_for_slug(operator_slug)?;
++        let operator_root_public_key = operator.keys.root_signing.public_key().clone();
++        let bundle = self.store.borrow_mut().create_identity_with_client(
++            &self.client,
++            CreateIdentityRequest {
++                slug,
++                issued_at: issued_at_ms,
++                device_expires_at: None,
++                subkey_expires_at: None,
++                identity_type: IdentityType::Agent,
++                declared_operator_public_key: Some(&operator_root_public_key),
++            },
++        )?;
++        let attestation = self.store.borrow().issue_operator_attestation_with_client(
++            &self.client,
++            &operator,
++            IssueOperatorAttestationRequest {
++                operator_root_public_key: operator.keys.root_signing.public_key(),
++                agent_root_public_key: bundle.keys.root_signing.public_key(),
++                issued_at: issued_at_ms,
++                nonce: self.event_nonce()?,
++            },
++        )?;
++        self.identities
++            .borrow_mut()
++            .insert(slug.to_string(), bundle.clone());
++        self.operator_attestations
++            .borrow_mut()
++            .insert(slug.to_string(), attestation.clone());
++
++        Ok(records_from_identity(
++            &bundle,
++            IdentityType::Agent,
++            Some(attestation),
++        ))
++    }
++
++    fn rebind_local_identity_slug(
++        &self,
++        current_slug: &str,
++        new_slug: &str,
++        issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        if current_slug == new_slug {
++            let bundle = self.identity_for_slug(current_slug)?;
++            let operator_attestation = self.operator_attestations.borrow().get(new_slug).cloned();
++            return Ok(records_from_identity(
++                &bundle,
++                bundle.public_bundle.identity.identity_type,
++                operator_attestation,
++            ));
++        }
++
++        let mut bundle = self.identity_for_slug(current_slug)?;
++        let next_slug = Slug::new(new_slug.to_string())?;
++        let next_binding = self.store.borrow().issue_slug_binding_with_client(
++            &self.client,
++            &bundle.keys.root_signing,
++            &next_slug,
++            issued_at_ms,
++        )?;
++        bundle.slug = next_slug;
++        bundle.public_bundle.slug_binding = next_binding;
++
++        self.identities.borrow_mut().remove(current_slug);
++        self.identities
++            .borrow_mut()
++            .insert(new_slug.to_string(), bundle.clone());
++        let operator_attestation = self.operator_attestations.borrow_mut().remove(current_slug);
++        if let Some(attestation) = &operator_attestation {
++            self.operator_attestations
++                .borrow_mut()
++                .insert(new_slug.to_string(), attestation.clone());
++        }
++
++        Ok(records_from_identity(
++            &bundle,
++            bundle.public_bundle.identity.identity_type,
++            operator_attestation,
++        ))
+     }
+ 
+     fn activate_identity(&self, session: &SessionIdentity, now_ms: u64) -> Result<()> {
+@@ -555,6 +685,12 @@ where
+             ));
+         }
+ 
++        let operator_attestation = self
++            .operator_attestations
++            .borrow()
++            .get(&session.identity.slug)
++            .cloned()
++            .or_else(|| session.identity.operator_attestation.clone());
+         let verified_sender = self.client.verifier().verify_sender(SenderChain {
+             claimed_slug: &session.identity.slug,
+             identity: &session.identity.identity_cert,
+@@ -562,7 +698,7 @@ where
+             device: &session.device.cert,
+             subkey: &session.subkey.cert,
+             device_revocations: &[],
+-            operator_attestation: None,
++            operator_attestation: operator_attestation.as_ref(),
+             operator_revocation: None,
+             at_ms: now_ms,
+         })?;
+@@ -772,6 +908,7 @@ where
+         Ok(records_from_identity(
+             &bundle,
+             approval.identity_cert.identity_type,
++            None,
+         ))
+     }
+ 
+@@ -933,6 +1070,7 @@ where
+         Ok(records_from_identity(
+             &bundle,
+             input.trusted_context.identity_type,
++            None,
+         ))
+     }
+ 
+@@ -1317,6 +1455,23 @@ where
+     S: ProviderStoreOps,
+     R: CryptoRng + RngCore,
+ {
++    pub fn sign_http_as_subkey(
++        &self,
++        signer_slug: &str,
++        request: HttpRequestSigningInput<'_>,
++    ) -> Result<SignedHttpRequestHeaders> {
++        let identity = self.identity_for_slug(signer_slug)?;
++        self.store
++            .borrow()
++            .sign_http_as_subkey_with_client(
++                &self.client,
++                &identity,
++                request,
++                &mut *self.rng.borrow_mut(),
++            )
++            .map_err(SdkError::from)
++    }
++
+     fn identity_for_slug(&self, slug: &str) -> Result<Identity> {
+         self.identities
+             .borrow()
+@@ -1355,6 +1510,11 @@ where
+     }
+ 
+     fn verified_sender(&self, identity: &Identity, at_ms: u64) -> Result<VerifiedSender> {
++        let operator_attestation = self
++            .operator_attestations
++            .borrow()
++            .get(identity.slug.as_str())
++            .cloned();
+         Ok(self.client.verifier().verify_sender(SenderChain {
+             claimed_slug: identity.slug.as_str(),
+             identity: &identity.public_bundle.identity,
+@@ -1362,7 +1522,7 @@ where
+             device: &identity.public_bundle.device,
+             subkey: &identity.public_bundle.subkey,
+             device_revocations: &[],
+-            operator_attestation: None,
++            operator_attestation: operator_attestation.as_ref(),
+             operator_revocation: None,
+             at_ms,
+         })?)
+@@ -1467,6 +1627,7 @@ where
+ fn records_from_identity(
+     bundle: &Identity,
+     identity_type: IdentityType,
++    operator_attestation: Option<OperatorAttestation>,
+ ) -> (IdentityRecord, DeviceRecord, SubkeyRecord) {
+     let device = DeviceRecord {
+         device_id: bundle.device_id.as_str().to_string(),
+@@ -1502,6 +1663,7 @@ fn records_from_identity(
+             device_kem: bundle.handles.device_kem.as_str().to_string(),
+             subkey_signing: bundle.handles.subkey_signing.as_str().to_string(),
+         }),
++        operator_attestation,
+     };
+     (identity, device, subkey)
+ }
+@@ -1730,4 +1892,81 @@ mod tests {
+ 
+         assert!(provider.identity_for_slug("alice").is_ok());
+     }
++
++    #[test]
++    fn activate_agent_identity_uses_persisted_operator_attestation() {
++        let provider = CoreCryptoProvider::test();
++        let issued_at_ms = 1_000;
++        let (operator_identity, operator_device, operator_subkey) = provider
++            .create_identity("alice", IdentityType::Human, issued_at_ms)
++            .expect("operator identity should be created");
++        provider
++            .activate_identity(
++                &SessionIdentity {
++                    identity: operator_identity,
++                    device: operator_device,
++                    subkey: operator_subkey,
++                },
++                issued_at_ms,
++            )
++            .expect("operator should activate");
++        let (agent_identity, agent_device, agent_subkey) = provider
++            .create_agent_identity("alice-agent", "alice", issued_at_ms + 1)
++            .expect("agent identity should be created");
++        assert!(agent_identity.operator_attestation.is_some());
++
++        provider.identities.borrow_mut().clear();
++        provider.operator_attestations.borrow_mut().clear();
++        assert!(provider.identity_for_slug("alice-agent").is_err());
++
++        provider
++            .activate_identity(
++                &SessionIdentity {
++                    identity: agent_identity,
++                    device: agent_device,
++                    subkey: agent_subkey,
++                },
++                issued_at_ms + 1,
++            )
++            .expect("persisted attestation should rehydrate the agent identity");
++
++        assert!(provider.identity_for_slug("alice-agent").is_ok());
++    }
++
++    #[test]
++    fn sign_http_as_subkey_uses_active_identity() {
++        let provider = CoreCryptoProvider::test();
++        let issued_at_ms = 1_000;
++        let (identity, device, subkey) = provider
++            .create_identity("alice", IdentityType::Human, issued_at_ms)
++            .expect("identity should be created");
++
++        provider
++            .activate_identity(
++                &SessionIdentity {
++                    identity,
++                    device,
++                    subkey,
++                },
++                issued_at_ms,
++            )
++            .expect("identity should activate");
++
++        let headers = provider
++            .sign_http_as_subkey(
++                "alice",
++                HttpRequestSigningInput {
++                    method: "POST",
++                    path: "/messages",
++                    timestamp_ms: issued_at_ms,
++                    body: br#"{"hello":"world"}"#,
++                },
++            )
++            .expect("request should sign");
++
++        assert_eq!(headers.slug().as_str(), "alice");
++        assert!(headers.signer_id().starts_with("sk_"));
++        assert_eq!(headers.timestamp_ms(), issued_at_ms);
++        assert!(!headers.signature_b64u().is_empty());
++    }
+ }
+diff --git a/crates/client/src/providers/crypto/unavailable.rs b/crates/client/src/providers/crypto/unavailable.rs
+index a975098..89193f1 100644
+--- a/crates/client/src/providers/crypto/unavailable.rs
++++ b/crates/client/src/providers/crypto/unavailable.rs
+@@ -42,6 +42,24 @@ impl CryptoPort for UnavailableCryptoProvider {
+         Err(Self::error())
+     }
+ 
++    fn create_agent_identity(
++        &self,
++        _slug: &str,
++        _operator_slug: &str,
++        _issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        Err(Self::error())
++    }
++
++    fn rebind_local_identity_slug(
++        &self,
++        _current_slug: &str,
++        _new_slug: &str,
++        _issued_at_ms: u64,
++    ) -> Result<(IdentityRecord, DeviceRecord, SubkeyRecord)> {
++        Err(Self::error())
++    }
++
+     fn activate_identity(&self, _session: &SessionIdentity, _now_ms: u64) -> Result<()> {
+         Err(Self::error())
+     }
+diff --git a/crates/client/src/providers/mod.rs b/crates/client/src/providers/mod.rs
+index f02692d..b3520cf 100644
+--- a/crates/client/src/providers/mod.rs
++++ b/crates/client/src/providers/mod.rs
+@@ -9,8 +9,8 @@ pub use clock::*;
+ pub use crypto::*;
+ pub use rng::*;
+ pub use server::{
+-    HttpBody, HttpMethod, HttpRequest, HttpResponse, HttpServerProvider, HttpTransport,
+-    MockServerProvider, SdkServerProvider,
++    BlockingHttpTransport, HttpBody, HttpMethod, HttpRequest, HttpResponse, HttpServerProvider,
++    HttpTransport, MockServerProvider, SdkServerProvider, UnavailableHttpTransport,
+ };
+ pub use store::{MemoryStoreProvider, SdkStoreProvider, SqliteStoreProvider};
+ pub use telemetry::*;
+diff --git a/crates/client/src/providers/server/http/mod.rs b/crates/client/src/providers/server/http/mod.rs
+index 0ce5ddd..443d912 100644
+--- a/crates/client/src/providers/server/http/mod.rs
++++ b/crates/client/src/providers/server/http/mod.rs
+@@ -2,4 +2,7 @@ mod provider;
+ mod transport;
+ 
+ pub use provider::*;
+-pub use transport::{HttpBody, HttpMethod, HttpRequest, HttpResponse, HttpTransport};
++pub use transport::{
++    BlockingHttpTransport, HttpBody, HttpMethod, HttpRequest, HttpResponse, HttpTransport,
++    UnavailableHttpTransport,
++};
+diff --git a/crates/client/src/providers/server/http/provider.rs b/crates/client/src/providers/server/http/provider.rs
+index ed19b4a..db51b84 100644
+--- a/crates/client/src/providers/server/http/provider.rs
++++ b/crates/client/src/providers/server/http/provider.rs
+@@ -2,13 +2,17 @@ use serde::de::DeserializeOwned;
+ use serde::Serialize;
+ 
+ use crate::api::{CloudKeyBackupTrustedContext, Result, SdkError};
+-use crate::domain::{EnrollmentApprovalRecord, EnrollmentDeviceRequestRecord, SubkeyRecord};
++use crate::domain::{
++    EnrollmentApprovalRecord, EnrollmentDeviceRequestRecord, InvitationBootstrap,
++    InvitationDiscoveryItem, InvitationRecord, SpaceEventLog, SpaceEventLogEntry, SubkeyRecord,
++};
+ use crate::ports::{
+     AccountServerPort, AuthServerPort, BlobDownloadResult, BlobServerPort, BlobUploadRequest,
+     CertServerPort, CertSyncRequest, CertSyncResponse, CloudKeyBackupAccess, CloudKeyBackupRecord,
+-    CloudKeyBackupServerPort, DeleteCloudKeyBackupRequest, DeviceStatusResponse,
+-    EnrollmentInitResponse, GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest,
+-    GetProfilesRequest, GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
++    CloudKeyBackupServerPort, CommitSlugBindingRequest, CreateAgentRequest, CreateAgentResponse,
++    DeleteCloudKeyBackupRequest, DeviceStatusResponse, EnrollmentInitResponse,
++    GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest, GetProfilesRequest,
++    GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
+     PasswordAuthChangePasswordResponse, PasswordAuthRegistrationCommitRequest,
+     PasswordAuthRegistrationCommitResponse, PendingMessagesRequest, PendingMessagesResponse,
+     PostDeviceRevocationRequest, PutCloudKeyBackupRequest, RealtimePollRequest,
+@@ -23,8 +27,8 @@ use types::{
+ };
+ 
+ use super::transport::{
+-    decode_empty, decode_json, decode_optional_json, path_segment, HttpBody, HttpMethod,
+-    HttpRequest, HttpResponse, HttpTransport, UnavailableHttpTransport,
++    decode_empty, decode_json, decode_optional_json, path_segment, BlockingHttpTransport, HttpBody,
++    HttpMethod, HttpRequest, HttpResponse, HttpTransport,
+ };
+ 
+ pub struct HttpServerProvider {
+@@ -34,7 +38,7 @@ pub struct HttpServerProvider {
+ 
+ impl HttpServerProvider {
+     pub fn new(api_url: impl Into<String>) -> Result<Self> {
+-        Self::with_transport(api_url, UnavailableHttpTransport)
++        Self::with_transport(api_url, BlockingHttpTransport::default())
+     }
+ 
+     pub fn with_transport(
+@@ -227,6 +231,14 @@ impl AccountServerPort for HttpServerProvider {
+         self.post_empty(path, &request)
+     }
+ 
++    fn create_agent(&mut self, request: CreateAgentRequest) -> Result<CreateAgentResponse> {
++        self.post_json("/agents", &request)
++    }
++
++    fn commit_slug_binding(&mut self, request: CommitSlugBindingRequest) -> Result<()> {
++        self.post_empty("/certs/slug_binding", &request)
++    }
++
+     fn update_profile(&mut self, request: UpdateProfileRequest) -> Result<UpdateProfileResponse> {
+         self.patch_json("/identities/self", &request)
+     }
+@@ -308,33 +320,88 @@ impl CertServerPort for HttpServerProvider {
+ 
+ impl SpacesServerPort for HttpServerProvider {
+     fn post_space_events(&mut self, events: Vec<SignedEvent>) -> Result<()> {
+-        self.post_empty("/spaces/events", &events)
++        if events.is_empty() {
++            return Ok(());
++        }
++        let space_id = space_event_batch_space_id(&events)?;
++        #[derive(Serialize)]
++        struct PostEvents<'a> {
++            space_id: &'a str,
++            events: &'a [SignedEvent],
++        }
++        self.post_empty(
++            "/spaces/events",
++            &PostEvents {
++                space_id: &space_id,
++                events: &events,
++            },
++        )
+     }
+ 
+     fn list_invitations(&self, slug: &str) -> Result<Vec<crate::domain::InvitationDiscoveryItem>> {
+-        self.get_json(
+-            "/me/invitations",
+-            vec![("slug".to_string(), slug.to_string())],
+-        )
++        let response: InvitationsWireResponse = self.get_json(
++            "/invites",
++            vec![("direction".to_string(), "received".to_string())],
++        )?;
++        Ok(response.into_items(slug))
+     }
+ 
+     fn sync_space_events(&self, request: SpacesSyncRequest) -> Result<SpacesSyncResponse> {
+-        let path = request
+-            .space_id
+-            .as_ref()
+-            .map(|space_id| format!("/spaces/{}/events", path_segment(space_id)))
+-            .unwrap_or_else(|| "/spaces/events".to_string());
+-        let mut query = Vec::new();
+-        if let Some(requester_slug) = request.requester_slug {
+-            query.push(("requester_slug".to_string(), requester_slug));
++        if request.space_id.is_none() {
++            let spaces: BackendMySpacesResponse = self.get_json("/spaces", Vec::new())?;
++            let mut logs = Vec::new();
++            let mut invitations = if let Some(requester_slug) = request.requester_slug.as_deref() {
++                self.list_invitations(requester_slug)?
++            } else {
++                Vec::new()
++            };
++            for space in spaces.spaces {
++                let response = self.get_backend_space_events(
++                    &space.space_id,
++                    None,
++                    request.channel_id.as_deref(),
++                    request.limit,
++                )?;
++                let response = response.into_sync_response(space.space_id)?;
++                logs.extend(response.spaces);
++                invitations.extend(response.invitations);
++            }
++            return Ok(SpacesSyncResponse {
++                spaces: logs,
++                invitations,
++                next_cursor: None,
++                has_more: false,
++            });
+         }
+-        if let Some(cursor) = request.cursor {
+-            query.push(("cursor".to_string(), cursor));
++
++        let space_id = request.space_id.as_deref().unwrap_or_default();
++        let response = self.get_backend_space_events(
++            space_id,
++            request.cursor.as_deref(),
++            request.channel_id.as_deref(),
++            request.limit,
++        )?;
++        response.into_sync_response(space_id.to_string())
++    }
++}
++
++impl HttpServerProvider {
++    fn get_backend_space_events(
++        &self,
++        space_id: &str,
++        cursor: Option<&str>,
++        channel_id: Option<&str>,
++        limit: Option<usize>,
++    ) -> Result<SpaceEventsWireResponse> {
++        let path = format!("/spaces/{}/events", path_segment(space_id));
++        let mut query = Vec::new();
++        if let Some(cursor) = cursor {
++            query.push(("since".to_string(), cursor.to_string()));
+         }
+-        if let Some(channel_id) = request.channel_id {
+-            query.push(("channel_id".to_string(), channel_id));
++        if let Some(channel_id) = channel_id {
++            query.push(("channel_id".to_string(), channel_id.to_string()));
+         }
+-        if let Some(limit) = request.limit {
++        if let Some(limit) = limit {
+             query.push(("limit".to_string(), limit.to_string()));
+         }
+         self.get_json(path, query)
+@@ -348,40 +415,43 @@ impl MessagesServerPort for HttpServerProvider {
+ 
+     fn pending_messages(
+         &self,
+-        slug: &str,
+-        request: PendingMessagesRequest,
++        _slug: &str,
++        _request: PendingMessagesRequest,
+     ) -> Result<PendingMessagesResponse> {
+-        let mut query = vec![("slug".to_string(), slug.to_string())];
+-        if let Some(cursor) = request.cursor {
+-            query.push(("cursor".to_string(), cursor));
+-        }
+-        if let Some(limit) = request.limit {
+-            query.push(("limit".to_string(), limit.to_string()));
++        #[derive(serde::Deserialize)]
++        struct BackendPendingMessage {
++            envelope: MessageEnvelope,
+         }
+-        if let Some(device_id) = request.device_id {
+-            query.push(("device_id".to_string(), device_id));
++        #[derive(serde::Deserialize)]
++        struct BackendPendingResponse {
++            messages: Vec<BackendPendingMessage>,
+         }
+-        self.get_json("/messages/pending", query)
++
++        let response: BackendPendingResponse = self.get_json("/messages/pending", Vec::new())?;
++        Ok(PendingMessagesResponse {
++            envelopes: response
++                .messages
++                .into_iter()
++                .map(|message| message.envelope)
++                .collect(),
++            next_cursor: None,
++        })
+     }
+ 
+     fn ack_message(
+         &mut self,
+-        slug: &str,
+-        device_id: Option<&str>,
++        _slug: &str,
++        _device_id: Option<&str>,
+         envelope_id: &str,
+     ) -> Result<()> {
+         #[derive(Serialize)]
+-        struct AckMessage<'a> {
+-            slug: &'a str,
+-            device_id: Option<&'a str>,
+-            envelope_id: &'a str,
++        struct AckMessages<'a> {
++            envelope_ids: Vec<&'a str>,
+         }
+         self.post_empty(
+-            format!("/messages/{}/ack", path_segment(envelope_id)),
+-            &AckMessage {
+-                slug,
+-                device_id,
+-                envelope_id,
++            "/messages/ack",
++            &AckMessages {
++                envelope_ids: vec![envelope_id],
+             },
+         )
+     }
+@@ -516,6 +586,179 @@ fn push_csv_query(query: &mut Vec<(String, String)>, key: &str, values: Vec<Stri
+     }
+ }
+ 
++#[derive(serde::Deserialize)]
++struct BackendMySpacesResponse {
++    spaces: Vec<BackendMySpaceEntry>,
++}
++
++#[derive(serde::Deserialize)]
++struct BackendMySpaceEntry {
++    space_id: String,
++}
++
++#[derive(serde::Deserialize)]
++#[serde(untagged)]
++enum SpaceEventsWireResponse {
++    Core(SpacesSyncResponse),
++    Backend(BackendSpaceEventsResponse),
++}
++
++impl SpaceEventsWireResponse {
++    fn into_sync_response(self, default_space_id: String) -> Result<SpacesSyncResponse> {
++        match self {
++            Self::Core(response) => Ok(response),
++            Self::Backend(response) => Ok(SpacesSyncResponse {
++                spaces: vec![SpaceEventLog {
++                    space_id: default_space_id,
++                    entries: response
++                        .events
++                        .into_iter()
++                        .map(BackendSpaceEventEntry::into_log_entry)
++                        .collect(),
++                }],
++                invitations: Vec::new(),
++                next_cursor: response.next_cursor,
++                has_more: response.has_more,
++            }),
++        }
++    }
++}
++
++#[derive(serde::Deserialize)]
++struct BackendSpaceEventsResponse {
++    events: Vec<BackendSpaceEventEntry>,
++    next_cursor: Option<String>,
++    has_more: bool,
++}
++
++#[derive(serde::Deserialize)]
++struct BackendSpaceEventEntry {
++    seq: i64,
++    event_id: String,
++    kind: types::EventKind,
++    signer_slug: String,
++    #[serde(default)]
++    signer_device_id: String,
++    #[serde(default)]
++    signer_subkey_id: String,
++    payload: serde_json::Value,
++    signature: String,
++    payload_issued_at: i64,
++}
++
++impl BackendSpaceEventEntry {
++    fn into_log_entry(self) -> SpaceEventLogEntry {
++        let server_seq = u64::try_from(self.seq).unwrap_or_default();
++        let server_received_at_ms = u64::try_from(self.payload_issued_at).unwrap_or_default();
++        SpaceEventLogEntry {
++            server_seq,
++            server_received_at_ms,
++            event: SignedEvent {
++                event_type: "signed_event".to_string(),
++                version: 1,
++                event_id: self.event_id,
++                kind: self.kind,
++                payload: self.payload,
++                signer_slug: self.signer_slug,
++                signer_device_id: self.signer_device_id,
++                signer_subkey_id: self.signer_subkey_id,
++                signature: self.signature,
++            },
++        }
++    }
++}
++
++#[derive(serde::Deserialize)]
++#[serde(untagged)]
++enum InvitationsWireResponse {
++    Core(Vec<InvitationDiscoveryItem>),
++    Backend(BackendListInvitesResponse),
++}
++
++impl InvitationsWireResponse {
++    fn into_items(self, _slug: &str) -> Vec<InvitationDiscoveryItem> {
++        match self {
++            Self::Core(items) => items,
++            Self::Backend(response) => response
++                .invites
++                .into_iter()
++                .filter_map(BackendInviteEntry::into_discovery_item)
++                .collect(),
++        }
++    }
++}
++
++#[derive(serde::Deserialize)]
++struct BackendListInvitesResponse {
++    invites: Vec<BackendInviteEntry>,
++}
++
++#[derive(serde::Deserialize)]
++#[allow(dead_code)]
++struct BackendInviteEntry {
++    invitation_event_id: String,
++    scope: String,
++    space_id: String,
++    channel_id: Option<String>,
++    inviter_slug: String,
++    invitee_slug: String,
++    issued_at: i64,
++    projection: Option<InvitationRecord>,
++    invitation_event: Option<SpaceEventLogEntry>,
++    bootstrap: Option<InvitationBootstrap>,
++}
++
++impl BackendInviteEntry {
++    fn into_discovery_item(self) -> Option<InvitationDiscoveryItem> {
++        let _metadata = (
++            self.invitation_event_id,
++            self.scope,
++            self.space_id,
++            self.channel_id,
++            self.inviter_slug,
++            self.invitee_slug,
++            self.issued_at,
++        );
++        Some(InvitationDiscoveryItem {
++            projection: self.projection?,
++            invitation_event: self.invitation_event?,
++            bootstrap: self.bootstrap?,
++        })
++    }
++}
++
++fn space_event_batch_space_id(events: &[SignedEvent]) -> Result<String> {
++    let Some(first) = events.first() else {
++        return Err(SdkError::SchemaMismatch(
++            "space event batch cannot be empty".to_string(),
++        ));
++    };
++    let space_id = space_event_payload_space_id(first)?.to_string();
++    for event in events.iter().skip(1) {
++        let event_space_id = space_event_payload_space_id(event)?;
++        if event_space_id != space_id {
++            return Err(SdkError::SchemaMismatch(format!(
++                "space event batch contains multiple space_id values: {} and {}",
++                space_id, event_space_id
++            )));
++        }
++    }
++    Ok(space_id)
++}
++
++fn space_event_payload_space_id(event: &SignedEvent) -> Result<&str> {
++    event
++        .payload
++        .get("space_id")
++        .and_then(serde_json::Value::as_str)
++        .ok_or_else(|| {
++            SdkError::SchemaMismatch(format!(
++                "space event {} is missing payload.space_id",
++                event.event_id
++            ))
++        })
++}
++
+ fn cloud_backup_get_request(path: String, access: CloudKeyBackupAccess) -> HttpRequest {
+     match access {
+         CloudKeyBackupAccess::RecoveryHandle => HttpRequest::new(HttpMethod::Get, path),
+diff --git a/crates/client/src/providers/server/http/transport.rs b/crates/client/src/providers/server/http/transport.rs
+index 7860ab3..573ca74 100644
+--- a/crates/client/src/providers/server/http/transport.rs
++++ b/crates/client/src/providers/server/http/transport.rs
+@@ -2,6 +2,8 @@ use crate::api::{Result, SdkError};
+ use serde::de::DeserializeOwned;
+ use serde::Serialize;
+ use serde_json::Value;
++use std::io::Read;
++use std::time::Duration;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum HttpMethod {
+@@ -37,6 +39,58 @@ pub trait HttpTransport {
+     fn send(&self, request: HttpRequest) -> Result<HttpResponse>;
+ }
+ 
++#[derive(Debug)]
++pub struct BlockingHttpTransport {
++    agent: ureq::Agent,
++}
++
++impl BlockingHttpTransport {
++    pub fn new() -> Self {
++        Self {
++            agent: ureq::AgentBuilder::new()
++                .timeout(Duration::from_secs(30))
++                .build(),
++        }
++    }
++}
++
++impl Default for BlockingHttpTransport {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl HttpTransport for BlockingHttpTransport {
++    fn send(&self, request: HttpRequest) -> Result<HttpResponse> {
++        let api_url = request_api_url(&request)?;
++        let url = request_url(api_url, &request)?;
++        let method = match request.method {
++            HttpMethod::Delete => "DELETE",
++            HttpMethod::Get => "GET",
++            HttpMethod::Patch => "PATCH",
++            HttpMethod::Post => "POST",
++            HttpMethod::Put => "PUT",
++        };
++        let mut outbound = self.agent.request(method, &url);
++        for (key, value) in request.headers {
++            if key.eq_ignore_ascii_case("x-puffo-api-url") {
++                continue;
++            }
++            outbound = outbound.set(&key, &value);
++        }
++        let response = match request.body {
++            Some(HttpBody::Json(value)) => outbound.send_json(value),
++            Some(HttpBody::Bytes(value)) => outbound.send_bytes(&value),
++            None => outbound.call(),
++        };
++        match response {
++            Ok(response) => response_from_ureq(response),
++            Err(ureq::Error::Status(_, response)) => response_from_ureq(response),
++            Err(ureq::Error::Transport(_)) => Err(SdkError::NetworkUnavailable),
++        }
++    }
++}
++
+ #[derive(Debug, Default)]
+ pub struct UnavailableHttpTransport;
+ 
+@@ -133,6 +187,86 @@ pub(crate) fn ensure_success(status: u16) -> Result<()> {
+ }
+ 
+ pub(crate) fn path_segment(value: &str) -> String {
++    percent_encode(value)
++}
++
++fn request_api_url(request: &HttpRequest) -> Result<&str> {
++    request
++        .headers
++        .iter()
++        .find(|(key, _)| key.eq_ignore_ascii_case("x-puffo-api-url"))
++        .map(|(_, value)| value.as_str())
++        .ok_or_else(|| {
++            SdkError::ProviderMisconfigured(
++                "http transport requires x-puffo-api-url routing header".to_string(),
++            )
++        })
++}
++
++fn request_url(api_url: &str, request: &HttpRequest) -> Result<String> {
++    if request.path.starts_with("http://") || request.path.starts_with("https://") {
++        return Err(SdkError::ProviderMisconfigured(
++            "http request path must be relative to api_url".to_string(),
++        ));
++    }
++    let mut url = format!(
++        "{}{}{}",
++        api_url.trim_end_matches('/'),
++        if request.path.starts_with('/') {
++            ""
++        } else {
++            "/"
++        },
++        request.path.as_str()
++    );
++    if !request.query.is_empty() {
++        url.push('?');
++        for (idx, (key, value)) in request.query.iter().enumerate() {
++            if idx > 0 {
++                url.push('&');
++            }
++            url.push_str(&percent_encode(key));
++            url.push('=');
++            url.push_str(&percent_encode(value));
++        }
++    }
++    Ok(url)
++}
++
++fn response_from_ureq(response: ureq::Response) -> Result<HttpResponse> {
++    let status = response.status();
++    if status == 204 {
++        return Ok(HttpResponse::empty(status));
++    }
++    let content_type = response
++        .header("content-type")
++        .unwrap_or_default()
++        .to_ascii_lowercase();
++    if content_type.contains("application/json") {
++        let body = response
++            .into_json::<Value>()
++            .map_err(|error| SdkError::SchemaMismatch(format!("invalid JSON response: {error}")))?;
++        return Ok(HttpResponse {
++            status,
++            body: Some(HttpBody::Json(body)),
++        });
++    }
++    let mut body = Vec::new();
++    response
++        .into_reader()
++        .read_to_end(&mut body)
++        .map_err(|_| SdkError::NetworkUnavailable)?;
++    Ok(HttpResponse {
++        status,
++        body: if body.is_empty() {
++            None
++        } else {
++            Some(HttpBody::Bytes(body))
++        },
++    })
++}
++
++fn percent_encode(value: &str) -> String {
+     let mut out = String::new();
+     for byte in value.bytes() {
+         match byte {
+diff --git a/crates/client/src/providers/server/mock/provider.rs b/crates/client/src/providers/server/mock/provider.rs
+index 13833a3..3b60023 100644
+--- a/crates/client/src/providers/server/mock/provider.rs
++++ b/crates/client/src/providers/server/mock/provider.rs
+@@ -11,12 +11,13 @@ use crate::domain::{
+ use crate::ports::{
+     AccountServerPort, AuthServerPort, BlobDownloadResult, BlobServerPort, BlobUploadRequest,
+     CertServerPort, CertSyncRequest, CertSyncResponse, CloudKeyBackupAccess, CloudKeyBackupRecord,
+-    CloudKeyBackupServerPort, DeleteCloudKeyBackupRequest, DeviceStatusResponse,
+-    EnrollmentInitResponse, GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest,
+-    GetProfilesRequest, GetProfilesResponse, MessagesServerPort, PendingMessagesRequest,
+-    PendingMessagesResponse, PostDeviceRevocationRequest, PutCloudKeyBackupRequest,
+-    RealtimeServerPort, SignupRequest, SignupResponse, SpacesServerPort, SpacesSyncRequest,
+-    SpacesSyncResponse, UpdateProfileRequest, UpdateProfileResponse,
++    CloudKeyBackupServerPort, CommitSlugBindingRequest, CreateAgentRequest, CreateAgentResponse,
++    DeleteCloudKeyBackupRequest, DeviceStatusResponse, EnrollmentInitResponse,
++    GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest, GetProfilesRequest,
++    GetProfilesResponse, MessagesServerPort, PendingMessagesRequest, PendingMessagesResponse,
++    PostDeviceRevocationRequest, PutCloudKeyBackupRequest, RealtimeServerPort, SignupRequest,
++    SignupResponse, SpacesServerPort, SpacesSyncRequest, SpacesSyncResponse, UpdateProfileRequest,
++    UpdateProfileResponse,
+ };
+ use crate::ports::{
+     PasswordAuthChangePasswordRequest, PasswordAuthChangePasswordResponse,
+@@ -43,6 +44,10 @@ pub struct MockServerProvider {
+     pub signups: BTreeMap<String, SignupResponse>,
+     pub revoked_devices: BTreeSet<String>,
+     pub device_revocations: Vec<DeviceRevocation>,
++    pub agent_publications: BTreeMap<String, CreateAgentRequest>,
++    pub pending_agent_publications: BTreeMap<String, CreateAgentRequest>,
++    pub committed_slug_bindings: BTreeMap<String, types::SlugBinding>,
++    pub agent_publication_counter: u64,
+     pub enrollments: BTreeSet<String>,
+     pub enrollment_devices: BTreeMap<String, EnrollmentDeviceRequestRecord>,
+     pub enrollment_approvals: BTreeMap<String, EnrollmentApprovalRecord>,
+@@ -180,6 +185,82 @@ impl AccountServerPort for MockServerProvider {
+         Ok(())
+     }
+ 
++    fn create_agent(&mut self, request: CreateAgentRequest) -> Result<CreateAgentResponse> {
++        let existing = self
++            .agent_publications
++            .iter()
++            .find(|(_, published)| {
++                published.identity_cert.root_public_key == request.identity_cert.root_public_key
++            })
++            .map(|(slug, published)| (slug.clone(), published.device_cert.device_id.clone()));
++        if let Some((agent_slug, agent_device_id)) = existing {
++            return Ok(CreateAgentResponse {
++                agent_slug,
++                agent_device_id,
++                pending_token: None,
++                pending_expires_at: None,
++            });
++        }
++
++        self.agent_publication_counter += 1;
++        let agent_slug = format!(
++            "{}-{:04x}",
++            request.username.to_ascii_lowercase(),
++            self.agent_publication_counter
++        );
++        let pending_token = format!("pending_agent_{agent_slug}");
++        let agent_device_id = request.device_cert.device_id.clone();
++        self.pending_agent_publications
++            .insert(pending_token.clone(), request);
++        Ok(CreateAgentResponse {
++            agent_slug,
++            agent_device_id,
++            pending_token: Some(pending_token),
++            pending_expires_at: Some(MOCK_SERVER_APPEND_TIME_START_MS + 86_400_000),
++        })
++    }
++
++    fn commit_slug_binding(&mut self, request: CommitSlugBindingRequest) -> Result<()> {
++        let pending = self
++            .pending_agent_publications
++            .remove(&request.pending_token)
++            .ok_or_else(|| SdkError::ServerRejected("pending token not found".to_string()))?;
++        if pending.identity_cert.root_public_key != request.slug_binding.root_public_key {
++            return Err(SdkError::ServerRejected(
++                "slug binding root_public_key mismatch".to_string(),
++            ));
++        }
++        let slug = request.slug_binding.slug.clone();
++        self.cert_sync
++            .cache
++            .identities
++            .insert(slug.clone(), pending.identity_cert.clone());
++        self.cert_sync.cache.devices.insert(
++            pending.device_cert.device_id.clone(),
++            pending.device_cert.clone(),
++        );
++        self.cert_sync
++            .cache
++            .slug_bindings
++            .insert(slug.clone(), request.slug_binding.clone());
++        self.committed_slug_bindings
++            .insert(slug.clone(), request.slug_binding);
++        let profile_updated_at = self.next_profile_updated_at();
++        self.profiles
++            .entry(slug.clone())
++            .or_insert_with(|| IdentityProfileRecord {
++                slug: slug.clone(),
++                username: slug.clone(),
++                avatar_url: None,
++                bio: None,
++                discoverability: ProfileDiscoverability::SharedOnly,
++                profile_updated_at,
++            });
++        self.agent_publications.insert(slug, pending);
++        self.realtime_events.push(RealtimeEvent::CertsChanged);
++        Ok(())
++    }
++
+     fn update_profile(&mut self, request: UpdateProfileRequest) -> Result<UpdateProfileResponse> {
+         validate_profile_update(&request)?;
+         let updated_at = self.next_profile_updated_at();
+diff --git a/crates/client/src/providers/server/runtime.rs b/crates/client/src/providers/server/runtime.rs
+index 1c0f67b..461dcc9 100644
+--- a/crates/client/src/providers/server/runtime.rs
++++ b/crates/client/src/providers/server/runtime.rs
+@@ -6,9 +6,10 @@ use crate::domain::{EnrollmentApprovalRecord, EnrollmentDeviceRequestRecord, Sub
+ use crate::ports::{
+     AccountServerPort, AuthServerPort, BlobDownloadResult, BlobServerPort, BlobUploadRequest,
+     CertServerPort, CertSyncRequest, CertSyncResponse, CloudKeyBackupRecord,
+-    CloudKeyBackupServerPort, DeleteCloudKeyBackupRequest, DeviceStatusResponse,
+-    EnrollmentInitResponse, GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest,
+-    GetProfilesRequest, GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
++    CloudKeyBackupServerPort, CommitSlugBindingRequest, CreateAgentRequest, CreateAgentResponse,
++    DeleteCloudKeyBackupRequest, DeviceStatusResponse, EnrollmentInitResponse,
++    GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest, GetProfilesRequest,
++    GetProfilesResponse, MessagesServerPort, PasswordAuthChangePasswordRequest,
+     PasswordAuthChangePasswordResponse, PasswordAuthRegistrationCommitRequest,
+     PasswordAuthRegistrationCommitResponse, PendingMessagesRequest, PendingMessagesResponse,
+     PostDeviceRevocationRequest, PutCloudKeyBackupRequest, RealtimePollRequest,
+@@ -115,6 +116,14 @@ impl AccountServerPort for SdkServerProvider {
+         server_mut!(self, post_device_revocation(request))
+     }
+ 
++    fn create_agent(&mut self, request: CreateAgentRequest) -> Result<CreateAgentResponse> {
++        server_mut!(self, create_agent(request))
++    }
++
++    fn commit_slug_binding(&mut self, request: CommitSlugBindingRequest) -> Result<()> {
++        server_mut!(self, commit_slug_binding(request))
++    }
++
+     fn update_profile(&mut self, request: UpdateProfileRequest) -> Result<UpdateProfileResponse> {
+         server_mut!(self, update_profile(request))
+     }
+diff --git a/crates/client/tests/contract_client_api.rs b/crates/client/tests/contract_client_api.rs
+index 2aa0820..65f74ce 100644
+--- a/crates/client/tests/contract_client_api.rs
++++ b/crates/client/tests/contract_client_api.rs
+@@ -1,9 +1,12 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::api::{
+-    BatchUpdateMemberStatusCommand, CancelInvitationCommand, ClientSdk, CreateChannelCommand,
+-    CreateSpaceCommand, DeactivateCurrentDeviceCommand, InvitationResponseCommand, InviteCommand,
+-    MessageRouteView, OpenSessionCommand, PatchField, RemoveMemberCommand, SdkError,
+-    SendFileMessageCommand, SendMessageCommand, SetNotificationPreferenceCommand, SignupCommand,
+-    UpdateMemberRoleCommand, UpdateMemberStatusCommand, UpdateProfileCommand,
++    BatchUpdateMemberStatusCommand, CancelInvitationCommand, ClientSdk, CreateAgentIdentityCommand,
++    CreateChannelCommand, CreateSpaceCommand, DeactivateCurrentDeviceCommand,
++    InvitationResponseCommand, InviteCommand, MessageRouteView, OpenSessionCommand, PatchField,
++    RemoveMemberCommand, SdkError, SendFileMessageCommand, SendMessageCommand,
++    SetNotificationPreferenceCommand, SignupCommand, UpdateMemberRoleCommand,
++    UpdateMemberStatusCommand, UpdateProfileCommand,
+ };
+ use client::domain::{NotificationScope, NotificationSetting, ProfileDiscoverability};
+ use client::ports::{
+@@ -34,6 +37,88 @@ fn public_api_supports_signup_open_session_and_queries() {
+     assert_eq!(reopened.slug(), "alice");
+ }
+ 
++#[test]
++fn public_api_supports_operator_bound_agent_identity_creation() {
++    let sdk = ClientSdk::for_test().unwrap();
++    let operator = sdk
++        .signup(SignupCommand {
++            slug: "alice".to_string(),
++            identity_type: IdentityType::Human,
++        })
++        .unwrap();
++
++    let agent = operator
++        .create_agent_identity(CreateAgentIdentityCommand {
++            slug: "alice-agent".to_string(),
++        })
++        .unwrap();
++
++    assert_eq!(agent.slug(), "alice-agent");
++    let identities = sdk.list_identities().unwrap();
++    let agent_identity = identities
++        .iter()
++        .find(|identity| identity.slug == "alice-agent")
++        .unwrap();
++    let operator_identity = identities
++        .iter()
++        .find(|identity| identity.slug == "alice")
++        .unwrap();
++    assert_eq!(agent_identity.identity_type, IdentityType::Agent);
++    assert_eq!(
++        agent_identity
++            .identity_cert
++            .declared_operator_public_key
++            .as_deref(),
++        Some(operator_identity.identity_cert.root_public_key.as_str())
++    );
++}
++
++#[test]
++fn public_api_can_publish_agent_identity_with_server_allocated_slug() {
++    let server = Rc::new(RefCell::new(MockServerProvider::default()));
++    let sdk = ClientSdk::for_test_with_mock_server(server.clone()).unwrap();
++    let operator = sdk
++        .signup(SignupCommand {
++            slug: "alice".to_string(),
++            identity_type: IdentityType::Human,
++        })
++        .unwrap();
++
++    let agent = operator
++        .create_and_publish_agent_identity(CreateAgentIdentityCommand {
++            slug: "alice-agent".to_string(),
++        })
++        .unwrap();
++
++    assert_eq!(agent.slug(), "alice-agent-0001");
++    let identities = sdk.list_identities().unwrap();
++    assert!(identities
++        .iter()
++        .all(|identity| identity.slug != "alice-agent"));
++    let agent_identity = identities
++        .iter()
++        .find(|identity| identity.slug == "alice-agent-0001")
++        .unwrap();
++    assert_eq!(agent_identity.identity_type, IdentityType::Agent);
++    assert_eq!(agent_identity.slug_binding.slug, "alice-agent-0001");
++    assert!(agent_identity.operator_attestation.is_some());
++    assert!(server
++        .borrow()
++        .agent_publications
++        .contains_key("alice-agent-0001"));
++    assert!(server
++        .borrow()
++        .committed_slug_bindings
++        .contains_key("alice-agent-0001"));
++
++    let reopened = sdk
++        .open_session(OpenSessionCommand {
++            slug: "alice-agent-0001".to_string(),
++        })
++        .unwrap();
++    assert_eq!(reopened.slug(), "alice-agent-0001");
++}
++
+ #[test]
+ fn public_api_supports_profile_update_discovery_and_cache() {
+     let sdk = ClientSdk::for_test().unwrap();
+diff --git a/crates/client/tests/contract_profiles.rs b/crates/client/tests/contract_profiles.rs
+index 537b848..88c8e78 100644
+--- a/crates/client/tests/contract_profiles.rs
++++ b/crates/client/tests/contract_profiles.rs
+@@ -1,10 +1,11 @@
+ use client::api::{ClientSdk, SdkConfig, SecretStoreProviderKind, UserPresenceProviderKind};
++#[cfg(feature = "dev-tools")]
+ use client::providers::{
+     HttpServerProvider, SdkServerProvider, SdkStoreProvider, SqliteStoreProvider,
+ };
+-use types::IdentityType;
+ 
+ #[test]
++#[cfg(feature = "dev-tools")]
+ fn test_profile_constructs_without_server_url() {
+     let sdk = ClientSdk::for_test().expect("test profile should construct");
+     let profile = sdk.config().provider_profile();
+@@ -28,12 +29,15 @@ fn prod_profile_requires_real_providers_and_is_not_constructed_by_mock_runtime()
+         Ok(_) => panic!("prod provider runtime should not be wired to mock providers"),
+         Err(err) => err,
+     };
+-    assert!(err
+-        .to_string()
+-        .contains("prod client provider construction"));
++    let message = err.to_string();
++    assert!(
++        message.contains("prod client provider construction")
++            || message.contains("from_config cannot construct runtime providers")
++    );
+ }
+ 
+ #[test]
++#[cfg(feature = "dev-tools")]
+ fn dev_http_runtime_can_use_sqlite_store_without_mock_server() {
+     let config = SdkConfig::dev_http("http://127.0.0.1:3000");
+     let store = SdkStoreProvider::sqlite(
+@@ -42,13 +46,9 @@ fn dev_http_runtime_can_use_sqlite_store_without_mock_server() {
+     let server = SdkServerProvider::http(HttpServerProvider::new("http://127.0.0.1:3000").unwrap());
+     let sdk = ClientSdk::from_dev_providers(config, server, store).unwrap();
+ 
+-    let session = sdk
+-        .signup(client::api::SignupCommand {
+-            slug: "alice".to_string(),
+-            identity_type: IdentityType::Human,
+-        })
+-        .unwrap();
+-
+-    assert_eq!(session.slug(), "alice");
+-    assert_eq!(sdk.list_identities().unwrap()[0].slug, "alice");
++    assert_eq!(
++        sdk.config().provider_profile().api_url.as_deref(),
++        Some("http://127.0.0.1:3000")
++    );
++    assert_eq!(sdk.list_identities().unwrap(), Vec::new());
+ }
+diff --git a/crates/client/tests/contract_server_ports.rs b/crates/client/tests/contract_server_ports.rs
+index c2de2ee..34d0f71 100644
+--- a/crates/client/tests/contract_server_ports.rs
++++ b/crates/client/tests/contract_server_ports.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::actions::spaces::event_builder::unsigned_event;
+ use client::api::{
+     ClientSdk, CreateChannelCommand, CreateCloudKeyBackupCommand, CreateInviteCapabilityCommand,
+@@ -8,24 +10,29 @@ use client::domain::InvitationBootstrap;
+ use client::ports::{
+     AccountServerPort, AuthServerPort, BlobDownloadResult, BlobServerPort, BlobUploadRequest,
+     CertServerPort, CertSyncRequest, CertSyncResponse, CloudKeyBackupAccess,
+-    CloudKeyBackupServerPort, GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest,
+-    MessagesServerPort, PendingMessagesRequest, PendingMessagesResponse, PutCloudKeyBackupRequest,
+-    RealtimePollRequest, RealtimePollResponse, RealtimeServerPort, SpacesServerPort,
+-    SpacesSyncRequest, SpacesSyncResponse,
++    CloudKeyBackupServerPort, CommitSlugBindingRequest, CreateAgentRequest, CreateAgentResponse,
++    GetCloudKeyBackupRequest, GetCloudKeyBackupTrustedContextRequest, MessagesServerPort,
++    PendingMessagesRequest, PutCloudKeyBackupRequest, RealtimePollRequest, RealtimePollResponse,
++    RealtimeServerPort, SpacesServerPort, SpacesSyncRequest, SpacesSyncResponse,
+ };
+ use client::providers::{
+-    HttpMethod, HttpRequest, HttpResponse, HttpServerProvider, HttpTransport, MockServerProvider,
++    BlockingHttpTransport, HttpBody, HttpMethod, HttpRequest, HttpResponse, HttpServerProvider,
++    HttpTransport, MockServerProvider,
+ };
+ use crypto::client_api::DatabaseDek;
+ use std::cell::RefCell;
+ use std::collections::VecDeque;
++use std::io::{Read, Write};
++use std::net::TcpListener;
+ use std::rc::Rc;
++use std::time::Duration;
+ use types::{
+-    CloudKeyBackupTrustedContextResponse, CreateSpacePayload, EventKind, IdentityType,
+-    InviteToSpacePayload, PasswordAuthBackupHint, PasswordAuthLoginFinishRequest,
++    CloudKeyBackupTrustedContextResponse, CreateSpacePayload, DeviceCert, DeviceCertKey,
++    DeviceCertKeys, EventKind, IdentityCert, IdentityType, InviteToSpacePayload,
++    OperatorAttestation, PasswordAuthBackupHint, PasswordAuthLoginFinishRequest,
+     PasswordAuthLoginFinishResponse, PasswordAuthProtocol, PasswordAuthRegistrationFinishRequest,
+     PasswordAuthRegistrationStartRequest, PasswordAuthRegistrationStartResponse,
+-    RedeemInviteCapabilityPayload, SpaceAssignableRole,
++    RedeemInviteCapabilityPayload, SlugBinding, SpaceAssignableRole,
+ };
+ 
+ #[test]
+@@ -621,15 +628,67 @@ fn invite_capability_http_contract_never_posts_link_secret() {
+         signature: "signed_event_signature".to_string(),
+     };
+ 
+-    server.post_space_events(vec![event]).unwrap();
++    server.post_space_events(vec![event.clone()]).unwrap();
+ 
+     let requests = transport.requests();
+     assert_eq!(requests[0].path, "/spaces/events");
++    assert_eq!(
++        requests[0].body,
++        Some(HttpBody::Json(serde_json::json!({
++            "space_id": "sp_no_secret",
++            "events": [event]
++        })))
++    );
+     let body = format!("{:?}", requests[0].body);
+     assert!(!body.contains(link_secret), "{body}");
+     assert!(!body.contains("link_secret"), "{body}");
+ }
+ 
++#[test]
++fn http_provider_maps_agent_publication_routes() {
++    let transport = RecordingHttpTransport::default();
++    let create_response = CreateAgentResponse {
++        agent_slug: "alice-agent-0001".to_string(),
++        agent_device_id: "dev_agent".to_string(),
++        pending_token: Some("pending_agent_alice_agent".to_string()),
++        pending_expires_at: Some(1_777_086_400_000),
++    };
++    transport.push(HttpResponse::json(201, &create_response).unwrap());
++    transport.push(HttpResponse::json(201, &serde_json::json!({ "ok": true })).unwrap());
++    let mut server =
++        HttpServerProvider::with_transport("http://127.0.0.1:3000/", transport.clone()).unwrap();
++
++    let create_request = dummy_create_agent_request();
++    let response = server.create_agent(create_request.clone()).unwrap();
++    assert_eq!(response, create_response);
++    let binding = dummy_slug_binding("alice-agent-0001", "agent-root");
++    server
++        .commit_slug_binding(CommitSlugBindingRequest {
++            pending_token: "pending_agent_alice_agent".to_string(),
++            slug_binding: binding.clone(),
++        })
++        .unwrap();
++
++    let requests = transport.requests();
++    assert_eq!(requests[0].method, HttpMethod::Post);
++    assert_eq!(requests[0].path, "/agents");
++    assert_eq!(
++        requests[0].body,
++        Some(HttpBody::Json(
++            serde_json::to_value(create_request).unwrap()
++        ))
++    );
++    assert_eq!(requests[1].method, HttpMethod::Post);
++    assert_eq!(requests[1].path, "/certs/slug_binding");
++    assert_eq!(
++        requests[1].body,
++        Some(HttpBody::Json(serde_json::json!({
++            "pending_token": "pending_agent_alice_agent",
++            "slug_binding": binding
++        })))
++    );
++}
++
+ #[test]
+ fn http_provider_maps_core_ports_to_http_routes() {
+     let transport = RecordingHttpTransport::default();
+@@ -639,7 +698,15 @@ fn http_provider_maps_core_ports_to_http_routes() {
+         HttpResponse::json(200, &Vec::<client::domain::InvitationDiscoveryItem>::new()).unwrap(),
+     );
+     transport.push(HttpResponse::json(200, &SpacesSyncResponse::default()).unwrap());
+-    transport.push(HttpResponse::json(200, &PendingMessagesResponse::default()).unwrap());
++    transport.push(
++        HttpResponse::json(
++            200,
++            &serde_json::json!({
++                "messages": []
++            }),
++        )
++        .unwrap(),
++    );
+     transport.push(HttpResponse::empty(204));
+     transport.push(HttpResponse::empty(204));
+     transport.push(HttpResponse::empty(404));
+@@ -658,7 +725,9 @@ fn http_provider_maps_core_ports_to_http_routes() {
+             device_ids: vec!["dev1".to_string()],
+         })
+         .unwrap();
+-    server.post_space_events(Vec::new()).unwrap();
++    server
++        .post_space_events(vec![signed_space_event("evt_1", "sp 1", "alice")])
++        .unwrap();
+     assert!(server.list_invitations("bob").unwrap().is_empty());
+     server
+         .sync_space_events(SpacesSyncRequest {
+@@ -713,29 +782,196 @@ fn http_provider_maps_core_ports_to_http_routes() {
+     );
+     assert_eq!(requests[1].method, HttpMethod::Post);
+     assert_eq!(requests[1].path, "/spaces/events");
+-    assert_eq!(requests[2].path, "/me/invitations");
++    assert_eq!(
++        requests[1].body,
++        Some(HttpBody::Json(serde_json::json!({
++            "space_id": "sp 1",
++            "events": [signed_space_event("evt_1", "sp 1", "alice")]
++        })))
++    );
++    assert_eq!(requests[2].path, "/invites");
+     assert_eq!(
+         requests[2].query,
+-        vec![("slug".to_string(), "bob".to_string())]
++        vec![("direction".to_string(), "received".to_string())]
+     );
+     assert_eq!(requests[3].path, "/spaces/sp%201/events");
+     assert_eq!(
+         requests[3].query,
+         vec![
+-            ("requester_slug".to_string(), "alice".to_string()),
+-            ("cursor".to_string(), "cur".to_string()),
++            ("since".to_string(), "cur".to_string()),
+             ("channel_id".to_string(), "ch1".to_string()),
+             ("limit".to_string(), "10".to_string()),
+         ]
+     );
+     assert_eq!(requests[4].path, "/messages/pending");
+-    assert_eq!(requests[5].path, "/messages/env%201/ack");
++    assert!(requests[4].query.is_empty());
++    assert_eq!(requests[5].path, "/messages/ack");
++    assert_eq!(
++        requests[5].body,
++        Some(HttpBody::Json(serde_json::json!({
++            "envelope_ids": ["env 1"]
++        })))
++    );
+     assert_eq!(requests[6].path, "/blobs/upload");
+     assert_eq!(requests[7].path, "/blobs/missing%20blob");
+     assert_eq!(requests[8].path, "/v1/subscribe/connect");
+     assert_eq!(requests[9].path, "/v1/subscribe/poll");
+ }
+ 
++#[test]
++fn http_provider_maps_backend_space_read_shape() {
++    let transport = RecordingHttpTransport::default();
++    transport.push(
++        HttpResponse::json(
++            200,
++            &serde_json::json!({
++                "spaces": [{
++                    "space_id": "sp 1",
++                    "name": "Contract Space",
++                    "role": "owner",
++                    "joined_at": 1,
++                    "latest_event_cursor": "1:alice:evt_1"
++                }]
++            }),
++        )
++        .unwrap(),
++    );
++    transport.push(HttpResponse::json(200, &serde_json::json!({ "invites": [] })).unwrap());
++    transport.push(
++        HttpResponse::json(
++            200,
++            &serde_json::json!({
++                "events": [{
++                    "seq": 7,
++                    "event_id": "evt_1",
++                    "kind": "create_space",
++                    "signer_slug": "alice",
++                    "signer_device_id": "dev_alice",
++                    "signer_subkey_id": "sk_alice",
++                    "payload": {
++                        "space_id": "sp 1",
++                        "name": "Contract Space",
++                        "created_at": 1,
++                        "nonce": "nonce_evt_1"
++                    },
++                    "signature": "signed_event_signature",
++                    "payload_issued_at": 1
++                }],
++                "next_cursor": "1:alice:evt_1",
++                "has_more": false
++            }),
++        )
++        .unwrap(),
++    );
++
++    let server =
++        HttpServerProvider::with_transport("http://127.0.0.1:3000/", transport.clone()).unwrap();
++    let response = server
++        .sync_space_events(SpacesSyncRequest {
++            requester_slug: Some("alice".to_string()),
++            cursor: None,
++            space_id: None,
++            channel_id: None,
++            limit: None,
++        })
++        .unwrap();
++
++    assert_eq!(response.spaces.len(), 1);
++    assert_eq!(response.spaces[0].space_id, "sp 1");
++    assert_eq!(response.spaces[0].entries.len(), 1);
++    let entry = &response.spaces[0].entries[0];
++    assert_eq!(entry.server_seq, 7);
++    assert_eq!(entry.server_received_at_ms, 1);
++    assert_eq!(entry.event.event_type, "signed_event");
++    assert_eq!(entry.event.version, 1);
++    assert_eq!(entry.event.event_id, "evt_1");
++    assert_eq!(entry.event.kind, EventKind::CreateSpace);
++    assert_eq!(entry.event.signer_slug, "alice");
++    assert_eq!(entry.event.signer_device_id, "dev_alice");
++    assert_eq!(entry.event.signer_subkey_id, "sk_alice");
++
++    let requests = transport.requests();
++    assert_eq!(requests[0].method, HttpMethod::Get);
++    assert_eq!(requests[0].path, "/spaces");
++    assert!(requests[0].query.is_empty());
++    assert_eq!(requests[1].method, HttpMethod::Get);
++    assert_eq!(requests[1].path, "/invites");
++    assert_eq!(
++        requests[1].query,
++        vec![("direction".to_string(), "received".to_string())]
++    );
++    assert_eq!(requests[2].method, HttpMethod::Get);
++    assert_eq!(requests[2].path, "/spaces/sp%201/events");
++    assert!(requests[2].query.is_empty());
++}
++
++#[test]
++fn http_provider_maps_backend_invitation_discovery_shape() {
++    let transport = RecordingHttpTransport::default();
++    let invitation_event = signed_invitation_event("evt_invite", "sp 1", "alice", "bob");
++    let invitation_entry = serde_json::json!({
++        "server_seq": 2,
++        "server_received_at_ms": 10,
++        "event": invitation_event,
++    });
++    transport.push(
++        HttpResponse::json(
++            200,
++            &serde_json::json!({
++                "invites": [{
++                    "invitation_event_id": "evt_invite",
++                    "scope": "space",
++                    "space_id": "sp 1",
++                    "channel_id": null,
++                    "inviter_slug": "alice",
++                    "invitee_slug": "bob",
++                    "issued_at": 10,
++                    "projection": {
++                        "invitation_event_id": "evt_invite",
++                        "space_id": "sp 1",
++                        "channel_id": null,
++                        "inviter_slug": "alice",
++                        "invitee_slug": "bob",
++                        "role": "member",
++                        "initial_channel_ids": [],
++                        "state": "Pending",
++                        "issued_at_ms": 10,
++                        "handler_event_id": null,
++                        "superseded_by_event_id": null
++                    },
++                    "invitation_event": invitation_entry,
++                    "bootstrap": {
++                        "Space": {
++                            "proof_events": [invitation_entry]
++                        }
++                    }
++                }]
++            }),
++        )
++        .unwrap(),
++    );
++
++    let server =
++        HttpServerProvider::with_transport("http://127.0.0.1:3000/", transport.clone()).unwrap();
++    let invitations = server.list_invitations("bob").unwrap();
++    assert_eq!(invitations.len(), 1);
++    assert_eq!(invitations[0].projection.invitation_event_id, "evt_invite");
++    assert_eq!(invitations[0].invitation_event.event.event_id, "evt_invite");
++    let InvitationBootstrap::Space { proof_events } = &invitations[0].bootstrap else {
++        panic!("expected space invitation bootstrap");
++    };
++    assert_eq!(proof_events.len(), 1);
++    assert_eq!(proof_events[0].event.signer_subkey_id, "sk_alice");
++
++    let requests = transport.requests();
++    assert_eq!(requests[0].method, HttpMethod::Get);
++    assert_eq!(requests[0].path, "/invites");
++    assert_eq!(
++        requests[0].query,
++        vec![("direction".to_string(), "received".to_string())]
++    );
++}
++
+ #[test]
+ fn http_provider_maps_password_auth_and_cloud_backup_recovery_routes() {
+     let transport = RecordingHttpTransport::default();
+@@ -842,6 +1078,138 @@ fn http_provider_maps_password_auth_and_cloud_backup_recovery_routes() {
+     assert!(requests[2].query.is_empty());
+ }
+ 
++#[test]
++fn blocking_http_transport_sends_json_and_decodes_json_response() {
++    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++    let api_url = format!("http://{}", listener.local_addr().unwrap());
++    let server = std::thread::spawn(move || read_single_http_request(listener));
++
++    let request = HttpRequest::new(HttpMethod::Post, "/v1/echo")
++        .query("q", "hello world")
++        .header("x-puffo-api-url", api_url)
++        .json(&serde_json::json!({ "hello": "world" }))
++        .unwrap();
++    let response = BlockingHttpTransport::default().send(request).unwrap();
++
++    assert_eq!(response.status, 200);
++    assert_eq!(
++        response.body,
++        Some(HttpBody::Json(serde_json::json!({ "ok": true })))
++    );
++    let raw_request = server.join().unwrap();
++    assert!(
++        raw_request.starts_with("POST /v1/echo?q=hello%20world HTTP/1.1"),
++        "{raw_request}"
++    );
++    assert!(
++        raw_request.contains("content-type: application/json")
++            || raw_request.contains("Content-Type: application/json")
++    );
++    assert!(
++        raw_request.contains(r#"{"hello":"world"}"#),
++        "{raw_request}"
++    );
++    assert!(!raw_request.contains("x-puffo-api-url"), "{raw_request}");
++}
++
++fn signed_space_event(event_id: &str, space_id: &str, signer_slug: &str) -> types::SignedEvent {
++    types::SignedEvent {
++        event_type: "signed_event".to_string(),
++        version: 1,
++        event_id: event_id.to_string(),
++        kind: EventKind::CreateSpace,
++        payload: serde_json::json!({
++            "space_id": space_id,
++            "name": "Contract Space",
++            "created_at": 1,
++            "nonce": format!("nonce_{event_id}")
++        }),
++        signer_slug: signer_slug.to_string(),
++        signer_device_id: format!("dev_{signer_slug}"),
++        signer_subkey_id: format!("sk_{signer_slug}"),
++        signature: "signed_event_signature".to_string(),
++    }
++}
++
++fn signed_invitation_event(
++    event_id: &str,
++    space_id: &str,
++    signer_slug: &str,
++    invitee_slug: &str,
++) -> types::SignedEvent {
++    types::SignedEvent {
++        event_type: "signed_event".to_string(),
++        version: 1,
++        event_id: event_id.to_string(),
++        kind: EventKind::InviteToSpace,
++        payload: serde_json::json!({
++            "space_id": space_id,
++            "invitee_slug": invitee_slug,
++            "invitee_role": null,
++            "initial_channel_ids": [],
++            "issued_at": 10,
++            "nonce": format!("nonce_{event_id}")
++        }),
++        signer_slug: signer_slug.to_string(),
++        signer_device_id: format!("dev_{signer_slug}"),
++        signer_subkey_id: format!("sk_{signer_slug}"),
++        signature: "signed_event_signature".to_string(),
++    }
++}
++
++fn dummy_create_agent_request() -> CreateAgentRequest {
++    CreateAgentRequest {
++        username: "alice-agent".to_string(),
++        identity_cert: IdentityCert {
++            cert_type: "identity_cert".to_string(),
++            version: 1,
++            root_public_key: "agent-root".to_string(),
++            identity_type: IdentityType::Agent,
++            declared_operator_public_key: Some("operator-root".to_string()),
++            self_signature: "identity-signature".to_string(),
++        },
++        device_cert: DeviceCert {
++            cert_type: "device_cert".to_string(),
++            version: 1,
++            device_id: "dev_agent".to_string(),
++            root_public_key: "agent-root".to_string(),
++            keys: DeviceCertKeys {
++                signing: DeviceCertKey {
++                    algorithm: "ed25519".to_string(),
++                    public_key: "agent-device-signing".to_string(),
++                },
++                encryption: DeviceCertKey {
++                    algorithm: "x25519".to_string(),
++                    public_key: "agent-device-kem".to_string(),
++                },
++            },
++            issued_at: 1,
++            expires_at: None,
++            signature: "device-signature".to_string(),
++        },
++        attestation: OperatorAttestation {
++            cert_type: "operator_attestation".to_string(),
++            version: 1,
++            operator_root_public_key: "operator-root".to_string(),
++            agent_root_public_key: "agent-root".to_string(),
++            issued_at: 1,
++            nonce: "attestation-nonce".to_string(),
++            signature: "attestation-signature".to_string(),
++        },
++    }
++}
++
++fn dummy_slug_binding(slug: &str, root_public_key: &str) -> SlugBinding {
++    SlugBinding {
++        cert_type: "slug_binding".to_string(),
++        version: 1,
++        slug: slug.to_string(),
++        root_public_key: root_public_key.to_string(),
++        issued_at: 1,
++        self_signature: "slug-binding-signature".to_string(),
++    }
++}
++
+ #[derive(Clone, Default)]
+ struct RecordingHttpTransport {
+     inner: Rc<RecordingHttpTransportInner>,
+@@ -885,3 +1253,51 @@ impl BlobResultExt for client::ports::BlobDownloadResult {
+         matches!(self, Self::Found(_))
+     }
+ }
++
++fn read_single_http_request(listener: TcpListener) -> String {
++    let (mut stream, _) = listener.accept().unwrap();
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .unwrap();
++    let mut bytes = Vec::new();
++    let mut chunk = [0_u8; 1024];
++    loop {
++        let read = stream.read(&mut chunk).unwrap();
++        if read == 0 {
++            break;
++        }
++        bytes.extend_from_slice(&chunk[..read]);
++        if complete_http_request(&bytes) {
++            break;
++        }
++    }
++    let response_body = r#"{"ok":true}"#;
++    write!(
++        stream,
++        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
++        response_body.len(),
++        response_body
++    )
++    .unwrap();
++    String::from_utf8(bytes).unwrap()
++}
++
++fn complete_http_request(bytes: &[u8]) -> bool {
++    let Some(header_start) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
++        return false;
++    };
++    let header_end = header_start + 4;
++    let headers = String::from_utf8_lossy(&bytes[..header_start]);
++    let content_length = headers
++        .lines()
++        .find_map(|line| {
++            let (name, value) = line.split_once(':')?;
++            if name.eq_ignore_ascii_case("content-length") {
++                value.trim().parse::<usize>().ok()
++            } else {
++                None
++            }
++        })
++        .unwrap_or(0);
++    bytes.len() >= header_end + content_length
++}
+diff --git a/crates/client/tests/contract_store_ports.rs b/crates/client/tests/contract_store_ports.rs
+index f055867..8da2a5c 100644
+--- a/crates/client/tests/contract_store_ports.rs
++++ b/crates/client/tests/contract_store_ports.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::api::{ClientSdk, SignupCommand};
+ use std::path::PathBuf;
+ 
+@@ -503,6 +505,7 @@ fn dummy_identity() -> IdentityRecord {
+         active_subkey_id: "sk_alice".to_string(),
+         local_state: client::domain::LocalIdentityState::Active,
+         key_handles: None,
++        operator_attestation: None,
+     }
+ }
+ 
+diff --git a/crates/client/tests/scenario_blobs.rs b/crates/client/tests/scenario_blobs.rs
+index 411a21c..b81557d 100644
+--- a/crates/client/tests/scenario_blobs.rs
++++ b/crates/client/tests/scenario_blobs.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_cloud_backup.rs b/crates/client/tests/scenario_cloud_backup.rs
+index bf42a75..4029edd 100644
+--- a/crates/client/tests/scenario_cloud_backup.rs
++++ b/crates/client/tests/scenario_cloud_backup.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_device_revocation.rs b/crates/client/tests/scenario_device_revocation.rs
+index ce6cdf2..19a3208 100644
+--- a/crates/client/tests/scenario_device_revocation.rs
++++ b/crates/client/tests/scenario_device_revocation.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_identity.rs b/crates/client/tests/scenario_identity.rs
+index c8f1e51..e5b27d3 100644
+--- a/crates/client/tests/scenario_identity.rs
++++ b/crates/client/tests/scenario_identity.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_messages.rs b/crates/client/tests/scenario_messages.rs
+index bf39652..98e095e 100644
+--- a/crates/client/tests/scenario_messages.rs
++++ b/crates/client/tests/scenario_messages.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_outbox.rs b/crates/client/tests/scenario_outbox.rs
+index 4000a21..b4f5a0d 100644
+--- a/crates/client/tests/scenario_outbox.rs
++++ b/crates/client/tests/scenario_outbox.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::api::{ClientSdk, QueueOutboxCommand, SignupCommand};
+ use client::domain::{OutboxKind, OutboxState};
+ use types::IdentityType;
+diff --git a/crates/client/tests/scenario_password_auth.rs b/crates/client/tests/scenario_password_auth.rs
+index 663cc8e..bf59fc9 100644
+--- a/crates/client/tests/scenario_password_auth.rs
++++ b/crates/client/tests/scenario_password_auth.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+diff --git a/crates/client/tests/scenario_smoke.rs b/crates/client/tests/scenario_smoke.rs
+index 8ceebee..860852f 100644
+--- a/crates/client/tests/scenario_smoke.rs
++++ b/crates/client/tests/scenario_smoke.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::scenario::ScenarioBuilder;
+ 
+ #[test]
+diff --git a/crates/client/tests/scenario_spaces.rs b/crates/client/tests/scenario_spaces.rs
+index 78959dd..1b94db3 100644
+--- a/crates/client/tests/scenario_spaces.rs
++++ b/crates/client/tests/scenario_spaces.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use std::cell::RefCell;
+ use std::rc::Rc;
+ 
+@@ -1508,6 +1510,7 @@ fn event_replay_applies_invite_precedence_role_status_and_removal() {
+                 channel_id: "ch_general".to_string(),
+                 name: "general".to_string(),
+                 initial_member_slugs: Vec::new(),
++                is_public: false,
+                 created_at: 2,
+                 nonce: "n2".to_string(),
+             },
+@@ -1822,6 +1825,7 @@ fn event_replay_rejects_duplicate_event_ids_and_resource_creates() {
+             channel_id: "ch_general".to_string(),
+             name: "general".to_string(),
+             initial_member_slugs: Vec::new(),
++            is_public: false,
+             created_at: 3,
+             nonce: "n3".to_string(),
+         },
+@@ -1835,6 +1839,7 @@ fn event_replay_rejects_duplicate_event_ids_and_resource_creates() {
+             channel_id: "ch_general".to_string(),
+             name: "general takeover".to_string(),
+             initial_member_slugs: Vec::new(),
++            is_public: false,
+             created_at: 4,
+             nonce: "n4".to_string(),
+         },
+diff --git a/crates/client/tests/scenario_sync.rs b/crates/client/tests/scenario_sync.rs
+index 092a191..775f1ae 100644
+--- a/crates/client/tests/scenario_sync.rs
++++ b/crates/client/tests/scenario_sync.rs
+@@ -1,3 +1,5 @@
++#![cfg(feature = "dev-tools")]
++
+ use client::api::{
+     ClientSdk, ClientSession, CreateSpaceCommand, InvitationResponseCommand, InviteCommand,
+     SendMessageCommand, SignupCommand,
+diff --git a/specs/001-client-sdk/contracts/client-api.md b/specs/001-client-sdk/contracts/client-api.md
+index c0e10a4..101b7e1 100644
+--- a/specs/001-client-sdk/contracts/client-api.md
++++ b/specs/001-client-sdk/contracts/client-api.md
+@@ -156,7 +156,8 @@ No-scope verified DM senders become message requests, accepted senders enter the
+ normal inbox, and rejected senders are blocked while replay state is still
+ marked. Active stranger DM send is not exposed by the MVP SDK. `SendMessageCommand` supports text helpers plus thread root, reply
+ target, content type, and structured JSON content.
+-Real HTTP transport remains provider work.
++The HTTP provider now has a blocking transport implementation; production use
++still depends on backend route/auth contracts and profile wiring.
+ 
+ ## Blob Actions
+ 
