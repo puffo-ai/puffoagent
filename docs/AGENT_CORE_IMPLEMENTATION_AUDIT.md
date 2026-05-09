@@ -580,6 +580,8 @@ backend PR #25: OPEN, non-draft, CLEAN, CI checks successful
 backend PR #26: OPEN, non-draft, CLEAN, no reported checks
   branch: feature/agent-core-pairing-contract -> dev
   head: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
+  local focused test: `cargo test -p puffo-server agent_core_pairings -- --nocapture`
+    passed on 2026-05-09 with 2 tests, 255 filtered
 web PR #52: OPEN, non-draft, CLEAN, CI checks successful
   branch: feature/agent-core-web-signed-mvp -> main
   head: 165c6a05458c98173444eca1070054bccfca5203

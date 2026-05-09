@@ -124,6 +124,8 @@ backend PR #25: open, non-draft, clean, CI green
 backend PR #26: open, non-draft, clean, no reported checks
   branch: feature/agent-core-pairing-contract -> dev
   head: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
+  local focused test: `cargo test -p puffo-server agent_core_pairings -- --nocapture`
+    passed on 2026-05-09 with 2 tests, 255 filtered
 ```
 
 Current production API base URL:
