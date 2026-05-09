@@ -35,7 +35,7 @@ shasum -a 256 /Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-local-
 | Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, clean; local puffo-client build/default/dev-tools tests pass |
 | Backend signer ids / invite proof | https://github.com/puffo-ai/puffo-server/pull/25 | Open, clean, CI green; local focused invite/membership/spaces tests pass |
 | Backend daemon pairing contract | https://github.com/puffo-ai/puffo-server/pull/26 | Open, clean, no reported checks; local focused pairing tests pass |
-| Web non-UI handoff | https://github.com/puffo-ai/puffo-core-han-group/pull/52 | Open, clean, CI green |
+| Web non-UI handoff | https://github.com/puffo-ai/puffo-core-han-group/pull/52 | Open, clean, CI green; local focused agent-core tests pass |
 
 ## Prompt-To-Artifact Checklist
 
@@ -47,7 +47,7 @@ shasum -a 256 /Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-local-
 | Add macOS sandbox, file/network/tool policy | `agent-core/src/policy/**`, `agent-core/src/providers/process/child-process.ts` | Policy resolver and sandbox tests covered by full `npm test` |
 | Add localhost daemon API and local grants | `agent-core/src/api/**`, `agent-core/src/daemon/**`, `agent-core/src/state/**` | API/daemon/state tests covered by full `npm test` |
 | Add server-confirmed pairing gateway | `agent-core/src/pairing/server-pairing.ts`, local `/pairing/*` routes | API pairing tests covered by full `npm test`; backend PR #26 still must merge/deploy |
-| Keep MVP Web signing path | `puffo-core-han-group/client/web/src/agent-core/**` | Web PR #52 is green; focused Web tests pass with 9 tests |
+| Keep MVP Web signing path | `puffo-core-han-group/client/web/src/agent-core/**` | Web PR #52 is green; local `agent-core-client` and `agent-core-provision` tests pass with 9 tests |
 | Publishable one-line install package | `agent-core/scripts/bootstrap-macos.sh`, `agent-core/package.json` | `npm run check:package`, `npm run smoke:package`, and prod `npm publish --dry-run` pass |
 | Avoid occupied unscoped npm package | package name `@puffo-ai/agent-core`, bin `agent` | npm dry-run confirms public scoped package; actual publish needs npm login/org access |
 
