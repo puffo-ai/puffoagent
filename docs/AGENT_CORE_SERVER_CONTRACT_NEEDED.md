@@ -142,7 +142,7 @@ https://github.com/puffo-ai/puffo-server/pull/25
 branch: feature/space-event-signer-ids
 base: dev
 commit: 7e971f775f225ebb41b99bf9c540084c6be2aca3
-status: open, non-draft, mergeable as of 2026-05-07
+status: open, non-draft, clean, CI green as of 2026-05-09
 ```
 
 That PR adds `signer_device_id` and `signer_subkey_id` persistence/response
@@ -160,8 +160,8 @@ Pairing contract backend PR observed on 2026-05-06:
 https://github.com/puffo-ai/puffo-server/pull/26
 branch: feature/agent-core-pairing-contract
 base: dev
-commit: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
-status: open, non-draft, mergeable as of 2026-05-07
+commit: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
+status: open, non-draft, clean with no reported checks as of 2026-05-09
 ```
 
 That PR adds the daemon-started pairing table and routes, authenticated Web

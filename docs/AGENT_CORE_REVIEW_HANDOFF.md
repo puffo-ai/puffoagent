@@ -5,7 +5,7 @@ This is the short reviewer handoff for the local agent-core MVP.
 ## Current Local State
 
 - Parent workspace branch: `feature/agent-core-local-mvp`
-- Parent workspace commit: use `git rev-parse --short HEAD` from this branch
+- Parent workspace commit: `858a509`
 - Parent workspace remote: `https://github.com/puffo-ai/puffoagent.git`
 - Parent review PR: https://github.com/puffo-ai/puffoagent/pull/1
 - Web submodule branch: `feature/agent-core-web-signed-mvp`
@@ -31,11 +31,11 @@ shasum -a 256 /Users/glimmer/Desktop/projects/puffo.ai/handoff/agent-core-local-
 
 | Area | PR | State |
 | --- | --- | --- |
-| Parent runtime integration | https://github.com/puffo-ai/puffoagent/pull/1 | Open, mergeable, CI green |
-| Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, mergeable |
-| Backend signer ids / invite proof | https://github.com/puffo-ai/puffo-server/pull/25 | Open, mergeable, CI green |
-| Backend daemon pairing contract | https://github.com/puffo-ai/puffo-server/pull/26 | Open, mergeable |
-| Web non-UI handoff | https://github.com/puffo-ai/puffo-core-han-group/pull/52 | Open, mergeable, CI green |
+| Parent runtime integration | https://github.com/puffo-ai/puffoagent/pull/1 | Open, clean, CI green |
+| Rust core native bridge | https://github.com/puffo-ai/core/pull/18 | Open, clean |
+| Backend signer ids / invite proof | https://github.com/puffo-ai/puffo-server/pull/25 | Open, clean, CI green |
+| Backend daemon pairing contract | https://github.com/puffo-ai/puffo-server/pull/26 | Open, clean, no reported checks |
+| Web non-UI handoff | https://github.com/puffo-ai/puffo-core-han-group/pull/52 | Open, merge state unknown, CI green |
 
 ## Prompt-To-Artifact Checklist
 

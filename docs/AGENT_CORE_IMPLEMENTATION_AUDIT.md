@@ -74,7 +74,7 @@ The active implementation request is interpreted as these concrete deliverables:
 | Production encrypted message transport | Dev sidecar opens/sends messages through `core`; `core` has HTTP provider route mapping plus `BlockingHttpTransport`; pulled backend has message send/pending/ack and space read/write routes; backend PR #25 adds signer-id replay plus invite proof material; backend PR #26 adds server-confirmed daemon pairing; `agent-native` has feature-gated `NativeCore::for_prod` provider construction with macOS Keychain crypto, SQLite/SQLCipher persistence, Rust-side Keychain-backed SQLCipher DEK, default `https://api.puffo.ai` server URL/default local database path forwarding with env overrides, Rust-side production auth token Keychain fallback, and Rust-side signed `x-puffo-*` HTTP header injection using the active native session signer | Partial / Blocked by end-to-end pairing/bootstrap verification, backend PR #25/#26 merge/deploy from `dev`, and production release packaging choice |
 | Web-to-local authorization after install | Local token exists; daemon can mint, persist, revoke, and verify hashed short-lived scoped local grants; grants can call management routes but cannot mint or revoke other grants | Done for local control-token bootstrapping |
 | Web-to-local authorization after pairing | Local grant APIs exist; `ServerPairingGateway` mints a short-lived local Web grant when a confirmed PR #26 poll returns `localWebGrant.mode = "daemon_mints"`, only on the one-time auth-token handoff | Implemented for the current PR #26 hint; product still decides whether Web should request/allow this grant in the UX |
-| Web-signed MVP handoff code | `puffo-core-han-group/client/web/src/agent-core/client.ts`, `puffo-core-han-group/client/web/src/agent-core/provision.ts`, `puffo-core-han-group/client/web/src/agent-core/types.ts`, and the `src/agent-core/index.ts` barrel add a non-UI Web integration surface for the new localhost API. The helper keeps Web-side certificate signing/server registration and hands localhost only public `coreIdentity` metadata with bearer/local-grant auth, not old `x-puffo-*` bridge auth or secret bundles. It installs a server-confirmed pairing `localGrant` for following management calls only when the pairing status is `confirmed`, or exchanges a printed control token for a scoped local grant and switches to that. `client/web/tests/setup.ts` now polyfills only broken Node test `localStorage`/`sessionStorage` objects, and `SignupPage` clears its invite debounce timer on unmount so full Web tests do not fail after teardown | Web PR https://github.com/puffo-ai/puffo-core-han-group/pull/52 is open and mergeable from `feature/agent-core-web-signed-mvp` to `main`; GitHub CI `Check & Test` and Web `Type-check + build` are green; local focused Web tests pass, and the earlier full Web unit tests/typecheck passed after generating the ignored wasm package; UI store/page migration is still a separate Web task |
+| Web-signed MVP handoff code | `puffo-core-han-group/client/web/src/agent-core/client.ts`, `puffo-core-han-group/client/web/src/agent-core/provision.ts`, `puffo-core-han-group/client/web/src/agent-core/types.ts`, and the `src/agent-core/index.ts` barrel add a non-UI Web integration surface for the new localhost API. The helper keeps Web-side certificate signing/server registration and hands localhost only public `coreIdentity` metadata with bearer/local-grant auth, not old `x-puffo-*` bridge auth or secret bundles. It installs a server-confirmed pairing `localGrant` for following management calls only when the pairing status is `confirmed`, or exchanges a printed control token for a scoped local grant and switches to that. `client/web/tests/setup.ts` now polyfills only broken Node test `localStorage`/`sessionStorage` objects, and `SignupPage` clears its invite debounce timer on unmount so full Web tests do not fail after teardown | Web PR https://github.com/puffo-ai/puffo-core-han-group/pull/52 is open from `feature/agent-core-web-signed-mvp` to `main`; GitHub currently reports merge state `UNKNOWN`, while CI `Check & Test` and Web `Type-check + build` are green. Local focused Web tests pass, and the earlier full Web unit tests/typecheck passed after generating the ignored wasm package; UI store/page migration is still a separate Web task |
 
 ## Core Upstream Reproducibility
 
@@ -568,18 +568,24 @@ with the 231-file tarball manifest, `npm run check:core-patch` passed, `git
 diff --check` passed, and a stale-text scan found no remaining legacy
 pairing-contract wording in `agent-core` or `docs`.
 
-Current PR state rechecked on 2026-05-07:
+Current PR state rechecked on 2026-05-09:
 
 ```text
-core PR #18: OPEN, non-draft, MERGEABLE
+core PR #18: OPEN, non-draft, CLEAN
   branch: feature/agent-core-native-bridge -> main
   head: ece389a12da5ce3745a213d54a0d55b1b56e3729
-backend PR #25: OPEN, non-draft, MERGEABLE, CI checks successful
+backend PR #25: OPEN, non-draft, CLEAN, CI checks successful
   branch: feature/space-event-signer-ids -> dev
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
-backend PR #26: OPEN, non-draft, MERGEABLE
+backend PR #26: OPEN, non-draft, CLEAN, no reported checks
   branch: feature/agent-core-pairing-contract -> dev
-  head: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
+  head: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
+web PR #52: OPEN, non-draft, merge state UNKNOWN, CI checks successful
+  branch: feature/agent-core-web-signed-mvp -> main
+  head: 165c6a05458c98173444eca1070054bccfca5203
+parent PR #1: OPEN, non-draft, CLEAN, smoke CI green
+  branch: feature/agent-core-local-mvp -> main
+  head: 858a5090231d1d669c47e3a6e2fe5e7f94cbde83
 ```
 
 The backend PR #26 diff was also checked for contract drift. Its response

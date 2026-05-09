@@ -8,7 +8,7 @@ upstream review branch:
 https://github.com/puffo-ai/core/pull/18
 branch: feature/agent-core-native-bridge
 commit: ece389a12da5ce3745a213d54a0d55b1b56e3729
-status: open, mergeable as of 2026-05-06
+status: open, clean as of 2026-05-09
 ```
 
 The parent `agent-core/core` gitlink currently records this PR commit so fresh

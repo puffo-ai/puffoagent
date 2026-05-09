@@ -18,7 +18,7 @@ Current review PR:
 https://github.com/puffo-ai/core/pull/18
 branch: feature/agent-core-native-bridge
 commit: ece389a12da5ce3745a213d54a0d55b1b56e3729
-status: open, non-draft, mergeable as of 2026-05-07
+status: open, non-draft, clean as of 2026-05-09
 ```
 
 Required action:
@@ -115,15 +115,15 @@ Required contract decisions:
   "daemon_mints"` hint by minting a short-lived management grant on the
   one-time auth-token poll.
 
-Current PR state rechecked on 2026-05-07:
+Current PR state rechecked on 2026-05-09:
 
 ```text
-backend PR #25: open, non-draft, mergeable, CI green
+backend PR #25: open, non-draft, clean, CI green
   branch: feature/space-event-signer-ids -> dev
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
-backend PR #26: open, non-draft, mergeable
+backend PR #26: open, non-draft, clean, no reported checks
   branch: feature/agent-core-pairing-contract -> dev
-  head: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
+  head: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
 ```
 
 Current production API base URL:
