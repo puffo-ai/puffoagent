@@ -579,7 +579,7 @@ backend PR #25: OPEN, non-draft, MERGEABLE, CI checks successful
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
 backend PR #26: OPEN, non-draft, MERGEABLE
   branch: feature/agent-core-pairing-contract -> dev
-  head: 50982d550c761530b9ea02ba4ae4c9e448f998c6
+  head: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
 ```
 
 The backend PR #26 diff was also checked for contract drift. Its response

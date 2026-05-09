@@ -123,7 +123,7 @@ backend PR #25: open, non-draft, mergeable, CI green
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
 backend PR #26: open, non-draft, mergeable
   branch: feature/agent-core-pairing-contract -> dev
-  head: 50982d550c761530b9ea02ba4ae4c9e448f998c6
+  head: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
 ```
 
 Current production API base URL:

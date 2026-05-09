@@ -160,7 +160,7 @@ Pairing contract backend PR observed on 2026-05-06:
 https://github.com/puffo-ai/puffo-server/pull/26
 branch: feature/agent-core-pairing-contract
 base: dev
-commit: 50982d550c761530b9ea02ba4ae4c9e448f998c6
+commit: 3251a8b972299d3e5241ba341e2b4bb49b5c875b
 status: open, non-draft, mergeable as of 2026-05-07
 ```
 
