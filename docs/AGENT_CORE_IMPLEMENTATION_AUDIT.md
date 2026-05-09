@@ -585,7 +585,7 @@ web PR #52: OPEN, non-draft, merge state UNKNOWN, CI checks successful
   head: 165c6a05458c98173444eca1070054bccfca5203
 parent PR #1: OPEN, non-draft, CLEAN, smoke CI green
   branch: feature/agent-core-local-mvp -> main
-  head: 858a5090231d1d669c47e3a6e2fe5e7f94cbde83
+  head: run `git rev-parse HEAD` from this branch or inspect PR #1
 ```
 
 The backend PR #26 diff was also checked for contract drift. Its response

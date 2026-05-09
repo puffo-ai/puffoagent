@@ -5,7 +5,7 @@ This is the short reviewer handoff for the local agent-core MVP.
 ## Current Local State
 
 - Parent workspace branch: `feature/agent-core-local-mvp`
-- Parent workspace commit: `858a509`
+- Parent workspace commit: run `git rev-parse --short HEAD` from this branch
 - Parent workspace remote: `https://github.com/puffo-ai/puffoagent.git`
 - Parent review PR: https://github.com/puffo-ai/puffoagent/pull/1
 - Web submodule branch: `feature/agent-core-web-signed-mvp`
