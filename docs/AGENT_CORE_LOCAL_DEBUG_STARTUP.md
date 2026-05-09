@@ -28,14 +28,9 @@ Health check:
 curl http://127.0.0.1:3000/health
 ```
 
-`make run-dev` enables the local dev fixture harness:
-
-```text
-POST /_dev/reset
-POST /_dev/seed/{scenario}
-GET  /_dev/state
-POST /_dev/auth-headers
-```
+`make run-dev` starts the Rust server with `PUFFO_DEV_SEED=1`. In the current
+backend branch this does not expose a public `/_dev/*` fixture API, so use the
+normal signup/password/enrollment flows for local identity state.
 
 If Postgres is running but startup fails with `role "puffo" does not exist`,
 your local Postgres is not the docker-compose database expected by `.env`.
