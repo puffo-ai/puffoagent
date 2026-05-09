@@ -577,6 +577,10 @@ core PR #18: OPEN, non-draft, CLEAN
 backend PR #25: OPEN, non-draft, CLEAN, CI checks successful
   branch: feature/space-event-signer-ids -> dev
   head: 7e971f775f225ebb41b99bf9c540084c6be2aca3
+  local focused tests passed on 2026-05-09:
+    `cargo test -p puffo-server invites -- --nocapture`      (6 tests, 249 filtered)
+    `cargo test -p puffo-server membership -- --nocapture`   (31 tests, 224 filtered)
+    `cargo test -p puffo-server spaces -- --nocapture`       (23 tests, 232 filtered)
 backend PR #26: OPEN, non-draft, CLEAN, no reported checks
   branch: feature/agent-core-pairing-contract -> dev
   head: eb1ee2b95d6ea6c1e89af7418580e34f3cccf478
