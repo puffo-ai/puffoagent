@@ -37,6 +37,18 @@ GET  /_dev/state
 POST /_dev/auth-headers
 ```
 
+If Postgres is running but startup fails with `role "puffo" does not exist`,
+your local Postgres is not the docker-compose database expected by `.env`.
+Either start the repo's Docker database with `make db-up`, or create the local
+dev role/database explicitly:
+
+```bash
+psql -h 127.0.0.1 -p 5432 -U postgres -d postgres \
+  -c "CREATE ROLE puffo LOGIN PASSWORD 'puffo';"
+psql -h 127.0.0.1 -p 5432 -U postgres -d postgres \
+  -c "CREATE DATABASE puffo OWNER puffo;"
+```
+
 ## 2. Web
 
 ```bash
